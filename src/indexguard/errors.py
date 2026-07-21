@@ -59,3 +59,23 @@ class IndexDeniedError(IndexGuardError):
 class StaleBaselineError(IndexGuardError):
     code = "STALE_BASELINE_VERSION"
     status_code = 409
+
+
+class AuthenticationError(IndexGuardError):
+    code = "AUTHENTICATION_FAILED"
+    status_code = 401
+
+
+class ServiceConfigurationError(IndexGuardError):
+    code = "SERVICE_NOT_CONFIGURED"
+    status_code = 503
+
+
+class WorkflowConflictError(IndexGuardError):
+    code = "WORKFLOW_CONFLICT"
+    status_code = 409
+
+
+class ExternalServiceError(IndexGuardError):
+    code = "RISK_SERVICE_ERROR"
+    status_code = 502

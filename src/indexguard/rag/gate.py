@@ -76,6 +76,24 @@ class IndexGate:
                 index_if_allowed=index_if_allowed,
             )
 
+    def hold(self, prepared: PreparedAnalysis, *, reason: str) -> IndexOutcome:
+        """Remove a candidate from the active index without inventing a risk result."""
+
+        with self._lock:
+            try:
+                stored = self.audit_store.get_prepared_analysis(prepared.analysis_id)
+            except AnalysisNotFoundError:
+                return self._deny(prepared, "ANALYSIS_NOT_AUDITED", record=False)
+            if stored != prepared:
+                return self._deny(prepared, "PREPARED_ANALYSIS_MISMATCH")
+            if not self.audit_store.verify_chain(prepared.analysis_id):
+                return self._deny(prepared, "AUDIT_CHAIN_INVALID", record=False)
+            return self._not_indexed(
+                prepared,
+                action=IndexAction.HOLD,
+                reason=reason,
+            )
+
     def _apply_locked(
         self,
         prepared: PreparedAnalysis,
