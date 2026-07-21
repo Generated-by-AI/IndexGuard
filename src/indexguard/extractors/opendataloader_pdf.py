@@ -53,9 +53,15 @@ def normalize_pdf_with_opendataloader(
 
     try:
         with tempfile.TemporaryDirectory(prefix="indexguard-opendataloader-") as temporary:
-            output_dir = Path(temporary)
+            work_dir = Path(temporary)
+            input_pdf = work_dir / "source.pdf"
+            output_dir = work_dir / "output"
+            output_dir.mkdir()
+            # BlobStore uses a content hash as the staged filename. OpenDataLoader's
+            # CLI requires a .pdf suffix even after A has verified the PDF magic.
+            shutil.copyfile(path, input_pdf)
             opendataloader_pdf.convert(
-                input_path=str(path),
+                input_path=str(input_pdf),
                 output_dir=str(output_dir),
                 format="markdown",
                 quiet=True,
@@ -68,7 +74,7 @@ def normalize_pdf_with_opendataloader(
             raw_markdown = "\n".join(
                 markdown.read_text(encoding="utf-8", errors="strict") for markdown in markdown_files
             )
-    except (OSError, RuntimeError, UnicodeError) as exc:
+    except (OSError, RuntimeError, UnicodeError, subprocess.SubprocessError) as exc:
         return OpenDataLoaderNormalization(None, "failed", type(exc).__name__)
 
     if len(raw_markdown) > limits.max_text_chars:
