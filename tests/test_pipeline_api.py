@@ -167,7 +167,13 @@ def test_stale_prepared_analysis_cannot_overwrite_a_newer_index_version(tmp_path
 def test_fastapi_prepare_finalize_and_search(tmp_path) -> None:
     baseline = write_hwpx(tmp_path / "baseline.hwpx", "승인 기준은 1,000만 원입니다.")
     candidate = write_hwpx(tmp_path / "candidate.hwpx", "승인 기준은 1억 원입니다.")
-    with TestClient(create_app(tmp_path / "runtime")) as client:
+    with TestClient(
+        create_app(
+            tmp_path / "runtime",
+            b_token="test-b-token",
+            operator_token="test-operator-token",
+        )
+    ) as client:
         with baseline.open("rb") as baseline_stream, candidate.open("rb") as candidate_stream:
             prepared_response = client.post(
                 "/api/v1/prepare",
@@ -186,7 +192,7 @@ def test_fastapi_prepare_finalize_and_search(tmp_path) -> None:
 
         finalize_response = client.post(
             f"/api/v1/analyses/{prepared['analysis_id']}/finalize",
-            params={"index_if_allowed": "true"},
+            headers={"X-IndexGuard-B-Token": "test-b-token"},
             json={
                 "decision": "ALLOW",
                 "risk_score": 0,
@@ -196,7 +202,22 @@ def test_fastapi_prepare_finalize_and_search(tmp_path) -> None:
             },
         )
         assert finalize_response.status_code == 200, finalize_response.text
-        assert finalize_response.json()["indexed"] is True
+        assert finalize_response.json()["state"] == "AWAITING_APPROVAL"
+
+        approve_response = client.post(
+            f"/api/v1/analyses/{prepared['analysis_id']}/commands",
+            headers={"X-IndexGuard-Operator-Token": "test-operator-token"},
+            json={
+                "action": "APPROVE",
+                "actor": "operator@example.com",
+                "reason": "reviewed the B evidence",
+                "idempotency_key": "approve-policy-v1",
+                "expected_candidate_sha256": prepared["candidate"]["sha256"],
+            },
+        )
+        assert approve_response.status_code == 200, approve_response.text
+        assert approve_response.json()["status"]["state"] == "INDEXED"
+        assert approve_response.json()["outcome"]["indexed"] is True
 
         search_response = client.get(
             "/api/v1/index/search",
@@ -207,9 +228,10 @@ def test_fastapi_prepare_finalize_and_search(tmp_path) -> None:
 
 
 def test_fastapi_contract_validation_is_fail_closed(tmp_path) -> None:
-    with TestClient(create_app(tmp_path / "runtime")) as client:
+    with TestClient(create_app(tmp_path / "runtime", b_token="test-b-token")) as client:
         response = client.post(
             "/api/v1/analyses/missing/finalize",
+            headers={"X-IndexGuard-B-Token": "test-b-token"},
             json={
                 "decision": "ALLOW",
                 "risk_score": 0,
@@ -223,6 +245,7 @@ def test_fastapi_contract_validation_is_fail_closed(tmp_path) -> None:
     assert payload["analysis_status"] == "FAILED"
     assert payload["decision"] == "BLOCK"
     assert payload["index_action"] == "QUARANTINE"
+    assert payload["risk_score"] is None
 
 
 def test_fastapi_unexpected_errors_keep_the_fail_closed_contract(tmp_path, monkeypatch) -> None:
@@ -241,3 +264,67 @@ def test_fastapi_unexpected_errors_keep_the_fail_closed_contract(tmp_path, monke
     assert payload["decision"] == "BLOCK"
     assert payload["index_action"] == "QUARANTINE"
     assert payload["error"]["code"] == "INTERNAL_GATEWAY_ERROR"
+
+
+def test_b_and_c_mutations_require_separate_service_tokens(tmp_path) -> None:
+    application = create_app(
+        tmp_path / "runtime",
+        b_token="test-b-token",
+        operator_token="test-operator-token",
+    )
+    policy = {
+        "decision": "ALLOW",
+        "risk_score": 0,
+        "findings": [],
+        "index_action": "INDEX",
+        "candidate_sha256": "a" * 64,
+    }
+    command = {
+        "action": "HOLD",
+        "actor": "operator@example.com",
+        "reason": "manual safety hold",
+        "idempotency_key": "hold-missing-analysis",
+        "expected_candidate_sha256": "a" * 64,
+    }
+
+    with TestClient(application) as client:
+        missing_b_token = client.post(
+            "/api/v1/analyses/missing/finalize",
+            json=policy,
+        )
+        b_token_cannot_command = client.post(
+            "/api/v1/analyses/missing/commands",
+            headers={"X-IndexGuard-Operator-Token": "test-b-token"},
+            json=command,
+        )
+
+    assert missing_b_token.status_code == 401
+    assert missing_b_token.json()["error"]["code"] == "AUTHENTICATION_FAILED"
+    assert b_token_cannot_command.status_code == 401
+    assert b_token_cannot_command.json()["error"]["code"] == "AUTHENTICATION_FAILED"
+
+
+def test_missing_service_token_configuration_fails_closed(tmp_path) -> None:
+    with TestClient(create_app(tmp_path / "runtime")) as client:
+        response = client.post(
+            "/api/v1/analyses/missing/finalize",
+            json={
+                "decision": "BLOCK",
+                "risk_score": 100,
+                "findings": [],
+                "index_action": "QUARANTINE",
+                "candidate_sha256": "a" * 64,
+            },
+        )
+
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "SERVICE_NOT_CONFIGURED"
+
+
+def test_b_and_c_tokens_must_not_share_the_same_secret(tmp_path) -> None:
+    with pytest.raises(ValueError, match="must be different"):
+        create_app(
+            tmp_path / "runtime",
+            b_token="shared-service-token",
+            operator_token="shared-service-token",
+        )

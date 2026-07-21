@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import BinaryIO, Self
 from uuid import uuid4
@@ -14,6 +15,7 @@ from indexguard.errors import FormatMismatchError, IntegrityError
 from indexguard.extractors.base import DEFAULT_LIMITS, ExtractionLimits
 from indexguard.extractors.registry import detect_format, extract_document
 from indexguard.integrity import resolve_code_revision
+from indexguard.operations import AnalysisOperations
 from indexguard.rag.gate import IndexGate
 from indexguard.rag.indexer import SqliteIndexer
 from indexguard.storage import BlobStore
@@ -41,6 +43,7 @@ class AnalysisPipeline:
         self.audit = AuditStore(runtime_dir / "audit.db")
         self.indexer = SqliteIndexer(runtime_dir / "index.db")
         self.gate = IndexGate(self.audit, self.indexer)
+        self.operations = AnalysisOperations(self)
 
     def prepare_streams(
         self,
@@ -50,6 +53,8 @@ class AnalysisPipeline:
         baseline_filename: str,
         candidate_stream: BinaryIO,
         candidate_filename: str,
+        changed_by: str = "unknown",
+        source_mtime_ns: int | None = None,
     ) -> PreparedAnalysis:
         baseline_staged = self.blobs.stage_stream(baseline_stream, baseline_filename)
         candidate_staged = self.blobs.stage_stream(candidate_stream, candidate_filename)
@@ -78,11 +83,16 @@ class AnalysisPipeline:
                 current_version.sha256 if current_version is not None else None
             ),
             code_revision=resolve_code_revision(self.repo_root),
+            version=self.audit.next_document_version(document_id),
+            changed_by=changed_by,
+            source_mtime_ns=source_mtime_ns,
+            prepared_at=datetime.now(UTC),
         )
         self.audit.record_prepared_analysis(
             prepared,
             candidate_blob_path=candidate_staged.path,
         )
+        self.operations.ensure_request(prepared.analysis_id)
         return prepared
 
     def prepare_paths(
@@ -91,7 +101,9 @@ class AnalysisPipeline:
         document_id: str,
         baseline_path: Path,
         candidate_path: Path,
+        changed_by: str = "filesystem",
     ) -> PreparedAnalysis:
+        source_mtime_ns = candidate_path.stat().st_mtime_ns
         with (
             baseline_path.open("rb") as baseline_stream,
             candidate_path.open("rb") as candidate_stream,
@@ -102,6 +114,8 @@ class AnalysisPipeline:
                 baseline_filename=baseline_path.name,
                 candidate_stream=candidate_stream,
                 candidate_filename=candidate_path.name,
+                changed_by=changed_by,
+                source_mtime_ns=source_mtime_ns,
             )
 
     def finalize(

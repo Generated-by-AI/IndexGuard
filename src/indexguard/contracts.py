@@ -7,6 +7,7 @@ decision/action combinations.
 
 from __future__ import annotations
 
+from datetime import datetime
 from enum import StrEnum
 from typing import Any
 
@@ -48,6 +49,25 @@ class IndexAction(StrEnum):
     INDEX = "INDEX"
     HOLD = "HOLD"
     QUARANTINE = "QUARANTINE"
+
+
+class WorkflowState(StrEnum):
+    """Operator-visible lifecycle state owned by the A gateway."""
+
+    PREPARED = "PREPARED"
+    ANALYSIS_REQUESTED = "ANALYSIS_REQUESTED"
+    ANALYSIS_FAILED = "ANALYSIS_FAILED"
+    AWAITING_APPROVAL = "AWAITING_APPROVAL"
+    HOLD = "HOLD"
+    INDEXED = "INDEXED"
+    QUARANTINED = "QUARANTINED"
+    SUPERSEDED = "SUPERSEDED"
+
+
+class OperatorAction(StrEnum):
+    APPROVE = "APPROVE"
+    HOLD = "HOLD"
+    REANALYZE = "REANALYZE"
 
 
 class TextLocation(StrictModel):
@@ -170,6 +190,12 @@ class PreparedAnalysis(StrictModel):
     diff: DiffReport
     expected_current_sha256: str | None = None
     code_revision: str | None = None
+    version: int = Field(default=1, ge=1)
+    changed_by: str = "unknown"
+    source_mtime_ns: int | None = Field(default=None, ge=0)
+    prepared_at: datetime | None = None
+    analysis_attempt: int = Field(default=1, ge=1)
+    supersedes_analysis_id: str | None = None
 
 
 class IndexOutcome(StrictModel):
@@ -180,3 +206,68 @@ class IndexOutcome(StrictModel):
     chunk_count: int = Field(ge=0)
     action: IndexAction
     reason: str
+
+
+class RiskAnalysisRequest(StrictModel):
+    """Sanitized, immutable payload that A hands to the B risk service."""
+
+    schema_version: str = "0.1"
+    request_id: str
+    analysis_id: str
+    document_id: str
+    version: int = Field(ge=1)
+    attempt: int = Field(ge=1)
+    requested_at: datetime
+    changed_by: str
+    baseline_sha256: str
+    candidate_sha256: str
+    baseline_normalized_sha256: str
+    candidate_normalized_sha256: str
+    before_text: str
+    after_text: str
+    diff: DiffReport
+    candidate_units: list[TextUnit] = Field(default_factory=list)
+    candidate_artifacts: list[Artifact] = Field(default_factory=list)
+
+
+class PolicySubmission(StrictModel):
+    """Authenticated B response bound to one request and candidate hash."""
+
+    request_id: str
+    submitted_by: str = Field(min_length=1, max_length=200)
+    policy: PolicyResult
+
+
+class OperatorCommand(StrictModel):
+    """Audited C command. Risk decisions are deliberately absent."""
+
+    action: OperatorAction
+    actor: str = Field(min_length=1, max_length=200)
+    reason: str = Field(min_length=1, max_length=1000)
+    idempotency_key: str = Field(min_length=8, max_length=200)
+    expected_candidate_sha256: str
+
+
+class AnalysisStatusView(StrictModel):
+    analysis_id: str
+    document_id: str
+    version: int = Field(ge=1)
+    attempt: int = Field(ge=1)
+    state: WorkflowState
+    candidate_sha256: str
+    changed_by: str
+    prepared_at: datetime | None = None
+    latest_request_id: str | None = None
+    latest_policy: PolicyResult | None = None
+    latest_outcome: IndexOutcome | None = None
+    allowed_commands: list[OperatorAction] = Field(default_factory=list)
+    audit_chain_valid: bool
+    supersedes_analysis_id: str | None = None
+
+
+class OperatorCommandResult(StrictModel):
+    command: OperatorCommand
+    status: AnalysisStatusView
+    outcome: IndexOutcome | None = None
+    replacement_analysis_id: str | None = None
+    idempotent_replay: bool = False

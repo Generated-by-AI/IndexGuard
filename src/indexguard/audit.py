@@ -200,9 +200,21 @@ class AuditStore:
                     "ANALYSIS_PREPARED",
                     {
                         "document_id": prepared.document_id,
+                        "version": prepared.version,
+                        "analysis_attempt": prepared.analysis_attempt,
                         "baseline_sha256": prepared.baseline.sha256,
+                        "baseline_normalized_sha256": prepared.baseline.normalized_sha256,
                         "candidate_sha256": prepared.candidate.sha256,
+                        "candidate_normalized_sha256": prepared.candidate.normalized_sha256,
                         "candidate_blob_path": str(blob_path),
+                        "changed_by": prepared.changed_by,
+                        "source_mtime_ns": prepared.source_mtime_ns,
+                        "prepared_at": (
+                            prepared.prepared_at.isoformat()
+                            if prepared.prepared_at is not None
+                            else None
+                        ),
+                        "supersedes_analysis_id": prepared.supersedes_analysis_id,
                         "code_revision": prepared.code_revision,
                     },
                 )
@@ -342,6 +354,42 @@ class AuditStore:
 
     def get_prepared_analysis(self, analysis_id: str) -> PreparedAnalysis:
         return self.get_analysis(analysis_id).prepared
+
+    def list_analysis_ids(self, *, limit: int = 100) -> list[str]:
+        """Return newest analysis IDs without exposing stored blob paths."""
+
+        if not 1 <= limit <= 1000:
+            raise ValueError("limit must be between 1 and 1000")
+        with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT analysis_id
+                FROM analyses
+                ORDER BY created_at DESC, analysis_id DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [str(row["analysis_id"]) for row in rows]
+
+    def next_document_version(self, document_id: str) -> int:
+        """Allocate a monotonic collection version for one logical document.
+
+        Reanalysis records keep the original version and therefore do not
+        consume another document version.
+        """
+
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT prepared_json FROM analyses WHERE document_id = ?",
+                (document_id,),
+            ).fetchall()
+        versions: list[int] = []
+        for row in rows:
+            prepared = PreparedAnalysis.model_validate_json(row["prepared_json"])
+            if prepared.supersedes_analysis_id is None:
+                versions.append(prepared.version)
+        return max(versions, default=0) + 1
 
     def list_events(self, analysis_id: str) -> list[AuditEvent]:
         with self._lock:
