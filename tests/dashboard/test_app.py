@@ -305,7 +305,7 @@ class _AuthorityMismatchGatewayHandler(_RequestedGatewayHandler):
             status["audit_chain_valid"] = False
             self._json(200, status)
             return
-        if unquote(urlsplit(self.path).path).startswith("/api/v1/index/current/"):
+        if unquote(urlsplit(self.path).path) == "/api/v1/index/current":
             type(self).current_index_reads += 1
             self._json(
                 200,
@@ -328,8 +328,9 @@ class _RagGatewayHandler(_EmptyGatewayHandler):
         if self.path == "/api/v1/analyses/anl_demo":
             self._json(200, _REQUESTED_ANALYSIS)
             return
-        if unquote(urlsplit(self.path).path) == "/api/v1/index/current/구매승인-한도-조정안":
+        if unquote(urlsplit(self.path).path) == "/api/v1/index/current":
             assert self.headers["X-IndexGuard-Operator-Token"] == "test-operator-token"
+            assert parse_qs(urlsplit(self.path).query)["document_id"] == ["구매승인-한도-조정안"]
             self._json(
                 200,
                 {"document_id": "구매승인-한도-조정안", "sha256": "b" * 64},

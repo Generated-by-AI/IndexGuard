@@ -198,9 +198,12 @@ Content-Type: application/json
 | `GET /api/v1/analyses?limit=100` | `AnalysisStatusView[]` |
 | `GET /api/v1/analyses/{id}/status` | 상태, 최신 요청·정책·결과, 허용 명령, 감사 체인 검증 |
 | `GET /api/v1/analyses/{id}` | 전체 `PreparedAnalysis`; B 또는 C 토큰 필요 |
-| `GET /api/v1/index/search?q=...&limit=5` | 승인된 현재 색인 검색 |
+| `GET /api/v1/index/search?q=...&limit=5&document_id=...` | C 토큰이 필요한 승인 현재 색인 검색; `IndexSearchResponse` 반환 |
+| `GET /api/v1/index/current?document_id=...` | C 토큰이 필요한 현재 승인 색인 SHA 조회; `CurrentIndexView` 반환 |
 
 상태 enum은 `PREPARED`, `ANALYSIS_REQUESTED`, `ANALYSIS_FAILED`, `AWAITING_APPROVAL`, `HOLD`, `INDEXED`, `QUARANTINED`, `SUPERSEDED`입니다.
+
+두 index 조회는 `X-IndexGuard-Operator-Token`을 요구합니다. `q`는 1–2,000자, `document_id`는 1–200자이며 문서 ID는 `/`를 포함할 수 있으므로 current 조회에서도 query parameter로 전달합니다. 문서 범위를 지정한 `IndexSearchResponse`는 요청 `query`, `document_id`, 조회 시점의 `current_sha256`, 그리고 같은 문서·SHA에 결속된 결과만 반환합니다. C는 생성 전후 current SHA를 비교하고 달라지면 답변을 폐기해야 합니다.
 
 ## 7. MCP 계약
 

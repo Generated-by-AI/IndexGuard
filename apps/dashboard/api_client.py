@@ -216,8 +216,9 @@ class DashboardApiClient:
     def get_current_index(self, document_id: str) -> CurrentIndexView:
         payload = self._request_json(
             "GET",
-            f"/api/v1/index/current/{document_id}",
+            "/api/v1/index/current",
             headers=self._operator_headers(),
+            params={"document_id": document_id},
         )
         result = self._validate(CurrentIndexView, payload)
         if result.document_id != document_id:

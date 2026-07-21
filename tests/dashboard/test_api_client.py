@@ -266,16 +266,19 @@ def test_search_rejects_authority_drift_and_incomplete_hits(tamper: str) -> None
     assert caught.value.code == "INVALID_GATEWAY_RESPONSE"
 
 
-def test_current_index_read_is_authenticated_and_correlated() -> None:
+def test_current_index_read_is_authenticated_correlated_and_slash_safe() -> None:
+    document_id = "policy/2026"
+
     def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.path == "/api/v1/index/current/expense-policy"
+        assert request.url.path == "/api/v1/index/current"
+        assert request.url.params["document_id"] == document_id
         assert request.headers["X-IndexGuard-Operator-Token"] == "operator-secret"
         return httpx.Response(
             200,
-            json={"document_id": "expense-policy", "sha256": CANDIDATE_SHA},
+            json={"document_id": document_id, "sha256": CANDIDATE_SHA},
         )
 
-    current = _client(handler).get_current_index("expense-policy")
+    current = _client(handler).get_current_index(document_id)
 
     assert current.sha256 == CANDIDATE_SHA
 

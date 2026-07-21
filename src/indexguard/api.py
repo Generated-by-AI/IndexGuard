@@ -264,9 +264,12 @@ def create_app(
 
     @application.get("/api/v1/index/search", response_model=IndexSearchResponse)
     def search(
-        q: Annotated[str, Query(min_length=1)],
+        q: Annotated[str, Query(min_length=1, max_length=2_000)],
         limit: Annotated[int, Query(ge=1, le=50)] = 5,
-        document_id: str | None = None,
+        document_id: Annotated[
+            str | None,
+            Query(min_length=1, max_length=200),
+        ] = None,
         x_indexguard_operator_token: Annotated[
             str | None,
             Header(alias="X-IndexGuard-Operator-Token"),
@@ -280,11 +283,11 @@ def create_app(
         return pipeline.search_snapshot(q, limit=limit, document_id=document_id)
 
     @application.get(
-        "/api/v1/index/current/{document_id}",
+        "/api/v1/index/current",
         response_model=CurrentIndexView,
     )
     def current_index(
-        document_id: str,
+        document_id: Annotated[str, Query(min_length=1, max_length=200)],
         x_indexguard_operator_token: Annotated[
             str | None,
             Header(alias="X-IndexGuard-Operator-Token"),

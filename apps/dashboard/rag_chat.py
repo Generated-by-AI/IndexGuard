@@ -111,7 +111,6 @@ def answer_from_protected_index(
         history.extend(
             [
                 {"role": "user", "content": exchange.question},
-                {"role": "assistant", "content": exchange.answer},
             ]
         )
 

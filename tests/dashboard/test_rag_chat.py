@@ -108,8 +108,9 @@ def test_no_protected_hits_returns_identity_bound_answer_without_model_call() ->
     assert client.identity_calls == ["expense-policy"]
 
 
-def test_generation_uses_source_labels_and_current_sha_history_only() -> None:
-    client = _SearchClient(_response(results=[_hit()]))
+def test_generation_uses_current_sources_without_rebinding_prior_answer_labels() -> None:
+    current_hit = _hit(chunk_index=2)
+    client = _SearchClient(_response(results=[current_hit]))
     answerer = _Answerer()
 
     exchange = answer_from_protected_index(
@@ -125,16 +126,17 @@ def test_generation_uses_source_labels_and_current_sha_history_only() -> None:
 
     assert exchange.generated is True
     assert exchange.index_sha256 == CANDIDATE_SHA
-    assert exchange.citations == [_hit()]
+    assert exchange.citations == [current_hit]
     call = answerer.calls[0]
     assert call["question"] == "질문"
-    assert call["history"] == [
-        {"role": "user", "content": "이전 질문"},
-        {"role": "assistant", "content": "이전 답변 [S1]."},
-    ]
+    history = call["history"]
+    assert isinstance(history, list)
+    assert history == [{"role": "user", "content": "이전 질문"}]
+    assert all("이전 답변 [S1]" not in item["content"] for item in history)
     evidence = call["evidence"]
     assert evidence[0]["citation_id"] == "S1"  # type: ignore[index]
     assert evidence[0]["sha256"] == CANDIDATE_SHA  # type: ignore[index]
+    assert evidence[0]["chunk_index"] == 2  # type: ignore[index]
     assert evidence[0]["lexical_score"] == 4.0  # type: ignore[index]
 
 

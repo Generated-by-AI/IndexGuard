@@ -234,8 +234,9 @@ def test_fastapi_prepare_finalize_and_search(tmp_path) -> None:
             params={"q": "1억 원", "document_id": "policy"},
         )
         current_response = client.get(
-            "/api/v1/index/current/policy",
+            "/api/v1/index/current",
             headers={"X-IndexGuard-Operator-Token": "test-operator-token"},
+            params={"document_id": "policy"},
         )
         assert missing_token.status_code == 401
         assert wrong_token.status_code == 401
@@ -249,6 +250,32 @@ def test_fastapi_prepare_finalize_and_search(tmp_path) -> None:
             "document_id": "policy",
             "sha256": prepared["candidate"]["sha256"],
         }
+
+
+def test_current_index_query_accepts_slash_document_id_and_bounds_inputs(tmp_path) -> None:
+    with TestClient(
+        create_app(tmp_path / "runtime", operator_token="test-operator-token")
+    ) as client:
+        slash_id = client.get(
+            "/api/v1/index/current",
+            headers={"X-IndexGuard-Operator-Token": "test-operator-token"},
+            params={"document_id": "policy/2026"},
+        )
+        oversized_document = client.get(
+            "/api/v1/index/current",
+            headers={"X-IndexGuard-Operator-Token": "test-operator-token"},
+            params={"document_id": "x" * 201},
+        )
+        oversized_query = client.get(
+            "/api/v1/index/search",
+            headers={"X-IndexGuard-Operator-Token": "test-operator-token"},
+            params={"q": "x" * 2_001, "document_id": "policy/2026"},
+        )
+
+    assert slash_id.status_code == 200
+    assert slash_id.json() == {"document_id": "policy/2026", "sha256": None}
+    assert oversized_document.status_code == 422
+    assert oversized_query.status_code == 422
 
 
 def test_fastapi_contract_validation_is_fail_closed(tmp_path) -> None:
