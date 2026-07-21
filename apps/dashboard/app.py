@@ -10,6 +10,7 @@ import json
 import os
 from html import escape
 from pathlib import Path
+from typing import Protocol
 from uuid import uuid4
 
 import streamlit as st
@@ -30,7 +31,12 @@ from apps.dashboard.presentation import (
     state_tone,
 )
 from apps.dashboard.renderers import render_diff, render_identity, render_provenance_chain
-from apps.dashboard.state import authority_issues, can_dispatch_analysis, effective_commands
+from apps.dashboard.state import (
+    authority_issues,
+    can_dispatch_analysis,
+    effective_commands,
+    replacement_authority_issues,
+)
 from indexguard.contracts import (
     AnalysisStatusView,
     Finding,
@@ -42,6 +48,18 @@ from indexguard.contracts import (
 
 _CSS_PATH = Path(__file__).parent / "assets" / "indexguard.css"
 _SUPPORTED_SUFFIXES = {".pdf", ".docx", ".hwpx"}
+
+
+class _AnalysisReader(Protocol):
+    def get_status(self, analysis_id: str) -> AnalysisStatusView: ...
+
+    def get_analysis(self, analysis_id: str) -> PreparedAnalysis: ...
+
+
+class _SessionState(Protocol):
+    def __delitem__(self, key: str) -> None: ...
+
+    def __setitem__(self, key: str, value: object) -> None: ...
 
 
 def main() -> None:
@@ -489,9 +507,20 @@ def _render_actions(
         _show_api_error("A rejected the operator command", exc)
         return
 
-    st.session_state.pop(idempotency_slot, None)
-    if result.replacement_analysis_id:
-        st.session_state["selected_analysis_id"] = result.replacement_analysis_id
+    try:
+        _finalize_command_navigation(
+            client,
+            analysis,
+            result.replacement_analysis_id,
+            st.session_state,
+            idempotency_slot,
+        )
+    except DashboardApiError as exc:
+        _show_api_error(
+            "A accepted reanalysis, but its replacement cannot be verified",
+            exc,
+        )
+        return
     replay = " Idempotent replay confirmed." if result.idempotent_replay else ""
     _set_flash(
         "success",
@@ -592,6 +621,52 @@ def _findings_html(findings: list[Finding]) -> str:
 def _show_api_error(prefix: str, error: DashboardApiError) -> None:
     retry = " You can retry after the underlying service recovers." if error.retryable else ""
     st.error(f"{prefix}: {error.message} [{error.code}].{retry}")
+
+
+def _fetch_verified_replacement(
+    client: _AnalysisReader,
+    original: PreparedAnalysis,
+    replacement_analysis_id: str,
+) -> PreparedAnalysis:
+    replacement_status = client.get_status(replacement_analysis_id)
+    replacement = client.get_analysis(replacement_analysis_id)
+    issues = replacement_authority_issues(
+        original,
+        replacement_status,
+        replacement,
+        expected_analysis_id=replacement_analysis_id,
+    )
+    if issues:
+        raise DashboardApiError(
+            code="INVALID_GATEWAY_RESPONSE",
+            message=(
+                "The replacement analysis is not bound to the submitted reanalysis evidence "
+                "lineage. The original selection was preserved."
+            ),
+            retryable=False,
+        )
+    return replacement
+
+
+def _finalize_command_navigation(
+    client: _AnalysisReader,
+    original: PreparedAnalysis,
+    replacement_analysis_id: str | None,
+    session_state: _SessionState,
+    idempotency_slot: str,
+) -> PreparedAnalysis | None:
+    replacement = None
+    if replacement_analysis_id is not None:
+        replacement = _fetch_verified_replacement(
+            client,
+            original,
+            replacement_analysis_id,
+        )
+
+    del session_state[idempotency_slot]
+    if replacement is not None:
+        session_state["selected_analysis_id"] = replacement.analysis_id
+    return replacement
 
 
 def _command_failure_is_definitive(error: DashboardApiError) -> bool:

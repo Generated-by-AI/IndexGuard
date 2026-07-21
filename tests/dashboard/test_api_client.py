@@ -443,6 +443,26 @@ def test_reanalysis_result_rejects_original_analysis_as_replacement() -> None:
     assert caught.value.code == "INVALID_GATEWAY_RESPONSE"
 
 
+@pytest.mark.parametrize("replacement_id", ["", "   ", "\t"])
+def test_reanalysis_result_rejects_blank_replacement_id(replacement_id: str) -> None:
+    command = _hold_command().model_copy(update={"action": OperatorAction.REANALYZE})
+    payload = _hold_result_payload(command)
+    payload["status"]["state"] = "SUPERSEDED"
+    payload["replacement_analysis_id"] = replacement_id
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    with pytest.raises(DashboardApiError) as caught:
+        _client(handler).execute_command(
+            "anl_demo",
+            command,
+            expected_document_id="expense-policy",
+        )
+
+    assert caught.value.code == "INVALID_GATEWAY_RESPONSE"
+
+
 def test_reanalysis_result_requires_a_distinct_replacement() -> None:
     command = _hold_command().model_copy(update={"action": OperatorAction.REANALYZE})
     payload = _hold_result_payload(command)

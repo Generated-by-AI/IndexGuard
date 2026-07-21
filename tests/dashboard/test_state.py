@@ -6,6 +6,7 @@ from apps.dashboard.state import (
     authority_issues,
     can_dispatch_analysis,
     effective_commands,
+    replacement_authority_issues,
 )
 from indexguard.contracts import (
     AnalysisStatusView,
@@ -88,6 +89,152 @@ def _status() -> AnalysisStatusView:
         ],
         audit_chain_valid=True,
     )
+
+
+def _replacement_analysis() -> PreparedAnalysis:
+    return _analysis().model_copy(
+        update={
+            "analysis_id": "anl_replacement",
+            "analysis_attempt": 2,
+            "supersedes_analysis_id": "anl_demo",
+        }
+    )
+
+
+def _replacement_status() -> AnalysisStatusView:
+    return _status().model_copy(
+        update={
+            "analysis_id": "anl_replacement",
+            "attempt": 2,
+            "state": WorkflowState.ANALYSIS_REQUESTED,
+            "latest_policy": None,
+            "latest_outcome": None,
+            "allowed_commands": [OperatorAction.HOLD, OperatorAction.REANALYZE],
+            "supersedes_analysis_id": "anl_demo",
+        }
+    )
+
+
+def test_valid_reanalysis_replacement_continues_exact_evidence_lineage() -> None:
+    assert (
+        replacement_authority_issues(
+            _analysis(),
+            _replacement_status(),
+            _replacement_analysis(),
+            expected_analysis_id="anl_replacement",
+        )
+        == []
+    )
+
+
+def test_reanalysis_replacement_rejects_revision_and_supersession_drift() -> None:
+    cases = [
+        (
+            _replacement_status().model_copy(update={"analysis_id": "anl_demo"}),
+            _replacement_analysis().model_copy(update={"analysis_id": "anl_demo"}),
+        ),
+        (
+            _replacement_status().model_copy(update={"analysis_id": "anl_unrelated"}),
+            _replacement_analysis().model_copy(update={"analysis_id": "anl_unrelated"}),
+        ),
+        (
+            _replacement_status().model_copy(update={"version": 2}),
+            _replacement_analysis().model_copy(update={"version": 2}),
+        ),
+        (
+            _replacement_status().model_copy(update={"attempt": 3}),
+            _replacement_analysis().model_copy(update={"analysis_attempt": 3}),
+        ),
+        (
+            _replacement_status().model_copy(update={"supersedes_analysis_id": "anl_other"}),
+            _replacement_analysis().model_copy(update={"supersedes_analysis_id": "anl_other"}),
+        ),
+    ]
+
+    for status, analysis in cases:
+        assert "REPLACEMENT_LINEAGE_MISMATCH" in {
+            issue.code
+            for issue in replacement_authority_issues(
+                _analysis(),
+                status,
+                analysis,
+                expected_analysis_id="anl_replacement",
+            )
+        }
+
+
+def test_reanalysis_replacement_rejects_document_and_material_drift() -> None:
+    replacement = _replacement_analysis()
+    replacement_status = _replacement_status()
+
+    different_document = replacement.model_copy(
+        update={
+            "document_id": "other-doc",
+            "baseline": replacement.baseline.model_copy(update={"document_id": "other-doc"}),
+            "candidate": replacement.candidate.model_copy(update={"document_id": "other-doc"}),
+        }
+    )
+    different_document_status = replacement_status.model_copy(update={"document_id": "other-doc"})
+
+    different_candidate_sha = "c" * 64
+    different_candidate = replacement.model_copy(
+        update={
+            "candidate": replacement.candidate.model_copy(
+                update={
+                    "sha256": different_candidate_sha,
+                    "normalized_sha256": different_candidate_sha,
+                }
+            ),
+            "diff": replacement.diff.model_copy(
+                update={"candidate_sha256": different_candidate_sha}
+            ),
+        }
+    )
+    different_candidate_status = replacement_status.model_copy(
+        update={"candidate_sha256": different_candidate_sha}
+    )
+
+    different_baseline_sha = "d" * 64
+    different_baseline = replacement.model_copy(
+        update={
+            "baseline": replacement.baseline.model_copy(
+                update={
+                    "sha256": different_baseline_sha,
+                    "normalized_sha256": different_baseline_sha,
+                }
+            ),
+            "diff": replacement.diff.model_copy(update={"baseline_sha256": different_baseline_sha}),
+        }
+    )
+
+    for status, analysis in (
+        (different_document_status, different_document),
+        (different_candidate_status, different_candidate),
+        (replacement_status, different_baseline),
+    ):
+        assert "REPLACEMENT_LINEAGE_MISMATCH" in {
+            issue.code
+            for issue in replacement_authority_issues(
+                _analysis(),
+                status,
+                analysis,
+                expected_analysis_id="anl_replacement",
+            )
+        }
+
+
+def test_reanalysis_replacement_rejects_internal_authority_failure() -> None:
+    status = _replacement_status().model_copy(update={"audit_chain_valid": False})
+
+    assert "AUDIT_CHAIN_INVALID" in {
+        issue.code
+        for issue in replacement_authority_issues(
+            _analysis(),
+            status,
+            _replacement_analysis(),
+            expected_analysis_id="anl_replacement",
+        )
+    }
 
 
 def test_consistent_authority_preserves_only_server_allowed_commands() -> None:
