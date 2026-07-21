@@ -31,7 +31,9 @@ IndexGuard/
 │  ├─ __init__.py
 │  ├─ contracts.py
 │  ├─ pipeline.py
-│  ├─ decision.py
+│  ├─ risk_engine.py
+│  ├─ risk_api.py
+│  ├─ security_policy.py
 │  ├─ extractors/
 │  │  ├─ base.py
 │  │  ├─ pdf.py
@@ -133,8 +135,9 @@ DocumentSnapshot(
 |---|---|---|
 | `extractors` | 안전한 파일 검증, 텍스트·구조·스타일 추출 | 위험 최종 판정 |
 | `detectors` | Diff와 재현 가능한 정적 finding 생성 | 직접 색인·격리 |
-| `llm/judge.py` | 문맥 위험 점수와 설명 생성 | hard-block 해제 |
-| `decision.py` | 점수, override, 최종 결정 | 문서 파싱 |
+| `risk_engine.py` | 정적 finding, 선택적 LLM 판정, 고위험 2차 감사 | 원본 파일·RAG·C 명령 접근 |
+| `risk_api.py` | 독립 B `/analyze`, bearer 인증, fail-closed 응답 | A 내부 상태 변경 |
+| `openai_compat.py` | 격리된 모델 요청과 JSON 근거 생성 | hard-block 해제·도구 실행 |
 | `rag/indexer.py` | `ALLOW + INDEX` 문서만 저장 | 자체 판단 |
 | `apps/api` | 업로드, 오케스트레이션, 응답 | 분석 로직 중복 구현 |
 | `apps/dashboard` | 결과·근거·RAG 비교 표시 | 백엔드 규칙 재구현 |

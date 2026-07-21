@@ -31,6 +31,8 @@ dashboard = [
 
 [project.scripts]
 indexguard-api = "indexguard.api:run"
+indexguard-risk-api = "indexguard.risk_api:run"
+indexguard-risk-eval = "indexguard.risk_evaluation:main"
 indexguard-mcp = "indexguard.mcp_server:run_stdio"
 indexguard-mcp-http = "indexguard.mcp_server:run_http"
 indexguard-scan = "indexguard.scanner:main"
