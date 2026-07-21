@@ -254,6 +254,37 @@ def test_command_result_is_bound_to_submitted_authority(tamper: str) -> None:
     assert caught.value.code == "INVALID_GATEWAY_RESPONSE"
 
 
+@pytest.mark.parametrize(
+    ("field", "tampered_value"),
+    [
+        ("analysis_id", "anl_other"),
+        ("document_id", "other-document"),
+        ("candidate_sha256", "c" * 64),
+    ],
+)
+def test_status_latest_outcome_identity_is_bound_to_submitted_authority(
+    field: str,
+    tampered_value: str,
+) -> None:
+    command = _hold_command()
+    payload = deepcopy(_hold_result_payload(command))
+    status_outcome = deepcopy(payload["status"]["latest_outcome"])
+    status_outcome[field] = tampered_value
+    payload["status"]["latest_outcome"] = status_outcome
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    with pytest.raises(DashboardApiError) as caught:
+        _client(handler).execute_command(
+            "anl_demo",
+            command,
+            expected_document_id="expense-policy",
+        )
+
+    assert caught.value.code == "INVALID_GATEWAY_RESPONSE"
+
+
 def test_non_replay_hold_result_must_match_current_status_outcome() -> None:
     command = _hold_command()
     payload = deepcopy(_hold_result_payload(command))
