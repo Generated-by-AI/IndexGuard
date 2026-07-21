@@ -2,22 +2,35 @@
 
 이 문서는 기술 리드, 제품 리드, AI 리드가 공유하는 단일 연결 규격입니다. 구현의 내부 자료형보다 이 계약이 우선합니다.
 
-## 1. 분석 요청
+## 1. A 분석 준비 요청
 
 ```http
-POST /api/v1/analyze
+POST /api/v1/prepare
 Content-Type: multipart/form-data
 ```
 
 | 필드 | 타입 | 필수 | 설명 |
 |---|---|---|---|
-| `baseline_file` | PDF/HWPX | 예 | 신뢰하는 이전 버전 |
-| `candidate_file` | PDF/HWPX | 예 | 색인 후보 버전 |
-| `index_if_allowed` | boolean | 아니오 | 기본값 `false`; 데모에서만 명시적으로 사용 |
+| `document_id` | string | 예 | 문서의 안정적인 논리 ID |
+| `baseline_file` | PDF/DOCX/HWPX | 예 | 신뢰하는 이전 버전 |
+| `candidate_file` | PDF/DOCX/HWPX | 예 | 색인 후보 버전 |
 
-두 파일의 형식은 같아야 합니다. 업로드 원본은 분석 완료 전까지 격리 영역에 있으며, 판정 전에 색인되지 않습니다.
+두 파일의 형식은 같아야 합니다. 기존 `document_id`는 baseline SHA-256이 현재 신뢰 색인 버전과 일치해야 합니다. 최초 버전은 신뢰된 운영자가 bootstrap합니다. 업로드 원본은 분석 완료 전까지 격리 영역에 있으며, 판정 전에 색인되지 않습니다.
 
-## 2. 최소 응답
+응답은 원본 SHA-256, 정규화된 텍스트·구조, 결정적 Diff를 담은 `PreparedAnalysis`입니다. B 서비스는 이 결과를 분석하되 원본 파일을 직접 저장하거나 색인하지 않습니다.
+
+## 2. B 정책 결과와 A 최종화 요청
+
+```http
+POST /api/v1/analyses/{analysis_id}/finalize?index_if_allowed=true
+Content-Type: application/json
+```
+
+`index_if_allowed`의 기본값은 `false`입니다. 즉, B가 `ALLOW + INDEX`를 반환해도 이 플래그를 명시하지 않으면 실제 색인은 실행되지 않습니다.
+
+A는 준비 시점의 현재 색인 SHA를 함께 보관하고, 최종 색인 트랜잭션에서 다시 비교합니다. 그 사이 다른 버전이 먼저 색인된 stale 분석은 `STALE_BASELINE_VERSION`으로 격리하며 최신 버전을 덮어쓰지 않습니다.
+
+### 최소 정책 결과
 
 모든 컴포넌트가 반드시 처리해야 하는 필드는 다음과 같습니다.
 
@@ -37,7 +50,23 @@ Content-Type: multipart/form-data
 }
 ```
 
-## 3. 확장 응답
+`ALLOW + INDEX`에는 A가 준비 응답에 제공한 `candidate.sha256`을 `candidate_sha256`으로 반드시 함께 반환합니다. A는 저장된 후보와 대조하며, 누락되거나 불일치하면 격리합니다. `REVIEW`와 `BLOCK`은 기존 최소 네 필드만으로도 안전하게 보류·격리할 수 있습니다.
+
+### A 색인 결과
+
+```json
+{
+  "analysis_id": "anl_01J...",
+  "document_id": "policy-v2",
+  "candidate_sha256": "...",
+  "indexed": false,
+  "chunk_count": 0,
+  "action": "QUARANTINE",
+  "reason": "POLICY_BLOCK"
+}
+```
+
+## 3. 대시보드용 확장 응답
 
 화면과 감사 로그는 최소 필드를 깨지 않고 아래 정보를 사용할 수 있습니다.
 
