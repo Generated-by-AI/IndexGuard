@@ -17,9 +17,12 @@ from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 
 from indexguard.contracts import (
     AnalysisStatusView,
+    IndexAction,
+    OperatorAction,
     OperatorCommand,
     OperatorCommandResult,
     PreparedAnalysis,
+    WorkflowState,
 )
 
 _STATUS_LIST = TypeAdapter(list[AnalysisStatusView])
@@ -164,6 +167,8 @@ class DashboardApiClient:
         self,
         analysis_id: str,
         command: OperatorCommand,
+        *,
+        expected_document_id: str,
     ) -> OperatorCommandResult:
         payload = self._request_json(
             "POST",
@@ -171,7 +176,15 @@ class DashboardApiClient:
             headers=self._operator_headers(),
             json=command.model_dump(mode="json"),
         )
-        return self._validate(OperatorCommandResult, payload)
+        result = self._validate(OperatorCommandResult, payload)
+        if not _command_result_matches(
+            result,
+            analysis_id=analysis_id,
+            expected_document_id=expected_document_id,
+            command=command,
+        ):
+            raise _invalid_response()
+        return result
 
     def search(
         self,
@@ -247,6 +260,63 @@ def _is_loopback_host(hostname: str) -> bool:
         return ip_address(normalized).is_loopback
     except ValueError:
         return False
+
+
+def _command_result_matches(
+    result: OperatorCommandResult,
+    *,
+    analysis_id: str,
+    expected_document_id: str,
+    command: OperatorCommand,
+) -> bool:
+    if result.command != command:
+        return False
+    status = result.status
+    if (
+        status.analysis_id != analysis_id
+        or status.document_id != expected_document_id
+        or status.candidate_sha256 != command.expected_candidate_sha256
+    ):
+        return False
+    for outcome in (result.outcome, status.latest_outcome):
+        if outcome is not None and (
+            outcome.analysis_id != analysis_id
+            or outcome.document_id != expected_document_id
+            or outcome.candidate_sha256 != command.expected_candidate_sha256
+        ):
+            return False
+    outcome = result.outcome
+    if outcome is None:
+        return False
+    if command.action in {OperatorAction.HOLD, OperatorAction.REANALYZE} and (
+        outcome.action is not IndexAction.HOLD or outcome.indexed
+    ):
+        return False
+    if command.action is OperatorAction.APPROVE and not (
+        (outcome.action is IndexAction.INDEX and outcome.indexed)
+        or (outcome.action is IndexAction.QUARANTINE and not outcome.indexed)
+    ):
+        return False
+    if command.action is OperatorAction.REANALYZE:
+        replacement_is_valid = (
+            result.replacement_analysis_id is not None
+            and result.replacement_analysis_id != analysis_id
+            and status.state is WorkflowState.SUPERSEDED
+        )
+    else:
+        replacement_is_valid = result.replacement_analysis_id is None
+    if not replacement_is_valid:
+        return False
+    if result.idempotent_replay:
+        return True
+    if status.latest_outcome != outcome:
+        return False
+    if command.action is OperatorAction.HOLD:
+        return status.state is WorkflowState.HOLD
+    if command.action is OperatorAction.REANALYZE:
+        return status.state is WorkflowState.SUPERSEDED
+    expected_state = WorkflowState.INDEXED if outcome.indexed else WorkflowState.QUARANTINED
+    return status.state is expected_state
 
 
 def _invalid_response() -> DashboardApiError:

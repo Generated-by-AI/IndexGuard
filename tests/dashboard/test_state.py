@@ -72,7 +72,20 @@ def _status() -> AnalysisStatusView:
             index_action=IndexAction.INDEX,
             candidate_sha256=CANDIDATE_SHA,
         ),
-        allowed_commands=[OperatorAction.APPROVE, OperatorAction.HOLD],
+        latest_outcome=IndexOutcome(
+            analysis_id="anl_demo",
+            document_id="doc",
+            candidate_sha256=CANDIDATE_SHA,
+            action=IndexAction.HOLD,
+            indexed=False,
+            chunk_count=0,
+            reason="INDEX_NOT_REQUESTED",
+        ),
+        allowed_commands=[
+            OperatorAction.APPROVE,
+            OperatorAction.HOLD,
+            OperatorAction.REANALYZE,
+        ],
         audit_chain_valid=True,
     )
 
@@ -83,6 +96,7 @@ def test_consistent_authority_preserves_only_server_allowed_commands() -> None:
     assert effective_commands(status, _analysis()) == [
         OperatorAction.APPROVE,
         OperatorAction.HOLD,
+        OperatorAction.REANALYZE,
     ]
 
 
@@ -113,8 +127,8 @@ def test_indexed_quarantine_is_a_critical_containment_failure() -> None:
         }
     )
     issues = authority_issues(status, _analysis())
-    assert [issue.code for issue in issues] == ["CONTAINMENT_FAILURE"]
-    assert issues[0].critical is True
+    assert "CONTAINMENT_FAILURE" in {issue.code for issue in issues}
+    assert all(issue.critical for issue in issues)
     assert effective_commands(status, _analysis()) == []
 
 
@@ -128,6 +142,7 @@ def test_dispatch_is_available_for_pending_and_retryable_analysis_states() -> No
             update={
                 "state": state,
                 "latest_policy": None,
+                "latest_outcome": None,
                 "allowed_commands": [OperatorAction.HOLD, OperatorAction.REANALYZE],
             }
         )
@@ -135,6 +150,118 @@ def test_dispatch_is_available_for_pending_and_retryable_analysis_states() -> No
 
     indexed = _status().model_copy(update={"state": WorkflowState.INDEXED})
     assert can_dispatch_analysis(indexed, _analysis()) is False
+
+
+def test_block_policy_cannot_report_indexed_or_offer_approval() -> None:
+    status = _status().model_copy(
+        update={
+            "state": WorkflowState.INDEXED,
+            "latest_policy": PolicyResult(
+                decision=Decision.BLOCK,
+                risk_score=100,
+                findings=[],
+                index_action=IndexAction.QUARANTINE,
+                candidate_sha256=CANDIDATE_SHA,
+            ),
+            "latest_outcome": IndexOutcome(
+                analysis_id="anl_demo",
+                document_id="doc",
+                candidate_sha256=CANDIDATE_SHA,
+                action=IndexAction.INDEX,
+                indexed=True,
+                chunk_count=1,
+                reason="contradictory fixture",
+            ),
+            "allowed_commands": [OperatorAction.APPROVE],
+        }
+    )
+
+    codes = {issue.code for issue in authority_issues(status, _analysis())}
+    assert {
+        "COMMAND_POLICY_MISMATCH",
+        "POLICY_OUTCOME_MISMATCH",
+        "STATE_OUTCOME_MISMATCH",
+    }.issubset(codes)
+    assert effective_commands(status, _analysis()) == []
+
+
+def test_allow_policy_can_be_reapproved_after_operator_hold() -> None:
+    status = _status().model_copy(
+        update={
+            "state": WorkflowState.HOLD,
+            "latest_outcome": IndexOutcome(
+                analysis_id="anl_demo",
+                document_id="doc",
+                candidate_sha256=CANDIDATE_SHA,
+                action=IndexAction.HOLD,
+                indexed=False,
+                chunk_count=0,
+                reason="OPERATOR_HOLD",
+            ),
+            "allowed_commands": [OperatorAction.APPROVE, OperatorAction.REANALYZE],
+        }
+    )
+
+    assert authority_issues(status, _analysis()) == []
+    assert effective_commands(status, _analysis()) == [
+        OperatorAction.APPROVE,
+        OperatorAction.REANALYZE,
+    ]
+
+
+def test_supported_policy_outcome_states_remain_authoritative() -> None:
+    cases = [
+        (
+            PolicyResult(
+                decision=Decision.REVIEW,
+                risk_score=45,
+                findings=[],
+                index_action=IndexAction.HOLD,
+                candidate_sha256=CANDIDATE_SHA,
+            ),
+            WorkflowState.HOLD,
+            IndexAction.HOLD,
+            False,
+        ),
+        (
+            PolicyResult(
+                decision=Decision.BLOCK,
+                risk_score=100,
+                findings=[],
+                index_action=IndexAction.QUARANTINE,
+                candidate_sha256=CANDIDATE_SHA,
+            ),
+            WorkflowState.QUARANTINED,
+            IndexAction.QUARANTINE,
+            False,
+        ),
+        (
+            _status().latest_policy,
+            WorkflowState.INDEXED,
+            IndexAction.INDEX,
+            True,
+        ),
+    ]
+    for policy, state, action, indexed in cases:
+        assert policy is not None
+        status = _status().model_copy(
+            update={
+                "state": state,
+                "latest_policy": policy,
+                "latest_outcome": IndexOutcome(
+                    analysis_id="anl_demo",
+                    document_id="doc",
+                    candidate_sha256=CANDIDATE_SHA,
+                    action=action,
+                    indexed=indexed,
+                    chunk_count=1 if indexed else 0,
+                    reason="positive-control",
+                ),
+                "allowed_commands": [OperatorAction.REANALYZE],
+            }
+        )
+
+        assert authority_issues(status, _analysis()) == []
 
 
 def test_rejects_internally_inconsistent_prepared_evidence() -> None:
@@ -181,12 +308,14 @@ def test_rejects_approve_without_bound_allow_index_policy() -> None:
         update={
             "state": WorkflowState.AWAITING_APPROVAL,
             "latest_policy": None,
+            "latest_outcome": None,
             "allowed_commands": [OperatorAction.APPROVE],
         }
     )
 
     assert [issue.code for issue in authority_issues(status, _analysis())] == [
-        "COMMAND_POLICY_MISMATCH"
+        "COMMAND_POLICY_MISMATCH",
+        "STATE_OUTCOME_MISMATCH",
     ]
     assert effective_commands(status, _analysis()) == []
 
@@ -224,10 +353,10 @@ def test_rejects_outcome_bound_to_different_evidence() -> None:
                 analysis_id="anl_other",
                 document_id="doc",
                 candidate_sha256=CANDIDATE_SHA,
-                action=IndexAction.INDEX,
-                indexed=True,
-                chunk_count=1,
-                reason="POLICY_ALLOW_INDEXED",
+                action=IndexAction.HOLD,
+                indexed=False,
+                chunk_count=0,
+                reason="INDEX_NOT_REQUESTED",
             )
         }
     )

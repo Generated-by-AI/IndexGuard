@@ -11,6 +11,9 @@ import pytest
 pytest.importorskip("streamlit", reason="dashboard extra is not installed")
 from streamlit.testing.v1 import AppTest
 
+from apps.dashboard.api_client import DashboardApiError
+from apps.dashboard.app import _command_failure_is_definitive
+
 _APP = Path(__file__).parents[2] / "apps" / "dashboard" / "app.py"
 
 
@@ -177,5 +180,28 @@ def test_app_does_not_open_an_implicit_first_queue_row(monkeypatch) -> None:
         app = AppTest.from_file(str(_APP), default_timeout=10).run()
 
     assert not app.exception
+    assert {"Gateway outcome", "Audit"}.issubset(app.dataframe[0].value.columns)
     assert any("Select an analysis" in message.value for message in app.info)
     assert not any(button.label == "Send pending request to B" for button in app.button)
+
+
+def test_command_failure_classification_preserves_ambiguous_idempotency() -> None:
+    invalid_response = DashboardApiError(
+        code="INVALID_GATEWAY_RESPONSE",
+        message="Response did not match the command.",
+        retryable=False,
+    )
+    unavailable = DashboardApiError(
+        code="GATEWAY_UNAVAILABLE",
+        message="Gateway unavailable.",
+        retryable=True,
+    )
+    conflict = DashboardApiError(
+        code="WORKFLOW_CONFLICT",
+        message="Command was rejected before execution.",
+        retryable=False,
+    )
+
+    assert _command_failure_is_definitive(invalid_response) is False
+    assert _command_failure_is_definitive(unavailable) is False
+    assert _command_failure_is_definitive(conflict) is True

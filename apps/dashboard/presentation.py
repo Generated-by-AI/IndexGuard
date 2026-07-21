@@ -67,13 +67,14 @@ class QueueRow:
 
     def as_record(self) -> dict[str, str]:
         return {
-            "Document": self.document,
+            "Document": f"{self.audit_chain} · {self.document}",
             "Revision": self.revision,
             "Workflow": self.workflow,
             "Policy": self.policy,
             "Requested action": self.requested_action,
             "Gateway outcome": self.gateway_outcome,
             "Prepared": self.prepared,
+            "Audit": self.audit_chain,
         }
 
 

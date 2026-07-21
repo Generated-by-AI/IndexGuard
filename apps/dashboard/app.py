@@ -200,11 +200,12 @@ def _render_queue(statuses: list[AnalysisStatusView]) -> str | None:
     rows = [queue_row(status) for status in filtered]
     event = st.dataframe(
         [row.as_record() for row in rows],
-        column_order=("Document", "Workflow", "Policy"),
+        column_order=("Document", "Workflow", "Policy", "Gateway outcome"),
         column_config={
-            "Document": st.column_config.TextColumn("Document", width="medium"),
-            "Workflow": st.column_config.TextColumn("Workflow", width="small"),
-            "Policy": st.column_config.TextColumn("Policy", width="small"),
+            "Document": st.column_config.TextColumn("Document · audit", width=150),
+            "Workflow": st.column_config.TextColumn("Workflow", width=80),
+            "Policy": st.column_config.TextColumn("Policy", width=70),
+            "Gateway outcome": st.column_config.TextColumn("Gateway", width=110),
         },
         hide_index=True,
         height=520,
@@ -477,9 +478,13 @@ def _render_actions(
     )
     try:
         with st.spinner(f"Sending {action.value} to A…"):
-            result = client.execute_command(analysis.analysis_id, command)
+            result = client.execute_command(
+                analysis.analysis_id,
+                command,
+                expected_document_id=analysis.document_id,
+            )
     except DashboardApiError as exc:
-        if not exc.retryable:
+        if _command_failure_is_definitive(exc):
             st.session_state.pop(idempotency_slot, None)
         _show_api_error("A rejected the operator command", exc)
         return
@@ -587,6 +592,10 @@ def _findings_html(findings: list[Finding]) -> str:
 def _show_api_error(prefix: str, error: DashboardApiError) -> None:
     retry = " You can retry after the underlying service recovers." if error.retryable else ""
     st.error(f"{prefix}: {error.message} [{error.code}].{retry}")
+
+
+def _command_failure_is_definitive(error: DashboardApiError) -> bool:
+    return not error.retryable and error.code != "INVALID_GATEWAY_RESPONSE"
 
 
 def _set_flash(level: str, message: str) -> None:

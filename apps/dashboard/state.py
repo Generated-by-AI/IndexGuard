@@ -123,19 +123,47 @@ def authority_issues(
                 critical=True,
             )
         )
+    is_allow_index = (
+        policy is not None
+        and policy.decision is Decision.ALLOW
+        and policy.index_action is IndexAction.INDEX
+    )
+    is_bound_allow_index = (
+        is_allow_index and policy is not None and policy.candidate_sha256 == candidate_sha
+    )
     if OperatorAction.APPROVE in status.allowed_commands and (
-        status.state is not WorkflowState.AWAITING_APPROVAL
-        or policy is None
-        or policy.decision is not Decision.ALLOW
-        or policy.index_action is not IndexAction.INDEX
-        or policy.candidate_sha256 != candidate_sha
+        status.state not in {WorkflowState.AWAITING_APPROVAL, WorkflowState.HOLD}
+        or not is_bound_allow_index
     ):
         issues.append(
             AuthorityIssue(
                 code="COMMAND_POLICY_MISMATCH",
                 message=(
                     "A offered approval without a bound ALLOW + INDEX policy in the "
-                    "awaiting-approval state. Approval is disabled."
+                    "awaiting-approval or operator-hold state. Approval is disabled."
+                ),
+                critical=True,
+            )
+        )
+    if status.state is WorkflowState.SUPERSEDED and status.allowed_commands:
+        issues.append(
+            AuthorityIssue(
+                code="COMMAND_STATE_MISMATCH",
+                message=(
+                    "A superseded analysis advertised operator commands. Commands are disabled."
+                ),
+                critical=True,
+            )
+        )
+    if status.state is WorkflowState.QUARANTINED and any(
+        command is not OperatorAction.REANALYZE for command in status.allowed_commands
+    ):
+        issues.append(
+            AuthorityIssue(
+                code="COMMAND_STATE_MISMATCH",
+                message=(
+                    "A quarantined analysis advertised a command other than reanalysis. "
+                    "Commands are disabled."
                 ),
                 critical=True,
             )
@@ -157,17 +185,74 @@ def authority_issues(
                     critical=True,
                 )
             )
-        elif outcome.action.value == "QUARANTINE" and outcome.indexed:
+        elif outcome.indexed and outcome.action is not IndexAction.INDEX:
             issues.append(
                 AuthorityIssue(
                     code="CONTAINMENT_FAILURE",
                     message=(
-                        "Critical containment failure: the gateway reports QUARANTINE while "
-                        "candidate chunks remain indexed. Escalate immediately."
+                        "Critical containment failure: the gateway reports a non-indexing "
+                        "action while candidate chunks remain indexed. Escalate immediately."
                     ),
                     critical=True,
                 )
             )
+    if (
+        outcome is not None
+        and (outcome.indexed or outcome.action is IndexAction.INDEX)
+        and (not is_allow_index)
+    ):
+        issues.append(
+            AuthorityIssue(
+                code="POLICY_OUTCOME_MISMATCH",
+                message=(
+                    "The gateway reports an index outcome without an ALLOW + INDEX policy. "
+                    "Treat the analysis as unresolved."
+                ),
+                critical=True,
+            )
+        )
+
+    pre_policy_state = status.state in {
+        WorkflowState.PREPARED,
+        WorkflowState.ANALYSIS_REQUESTED,
+        WorkflowState.ANALYSIS_FAILED,
+    }
+    state_outcome_consistent = True
+    if pre_policy_state:
+        state_outcome_consistent = policy is None and outcome is None
+    elif status.state is WorkflowState.AWAITING_APPROVAL:
+        state_outcome_consistent = (
+            is_allow_index
+            and outcome is not None
+            and not outcome.indexed
+            and outcome.action is IndexAction.HOLD
+        )
+    elif status.state is WorkflowState.HOLD:
+        state_outcome_consistent = (
+            outcome is not None and not outcome.indexed and outcome.action is IndexAction.HOLD
+        )
+    elif status.state is WorkflowState.INDEXED:
+        state_outcome_consistent = (
+            is_allow_index
+            and outcome is not None
+            and outcome.indexed
+            and outcome.action is IndexAction.INDEX
+        )
+    elif status.state is WorkflowState.QUARANTINED:
+        state_outcome_consistent = (
+            outcome is not None and not outcome.indexed and outcome.action is IndexAction.QUARANTINE
+        )
+    if not state_outcome_consistent:
+        issues.append(
+            AuthorityIssue(
+                code="STATE_OUTCOME_MISMATCH",
+                message=(
+                    "Workflow state, policy, and gateway outcome are internally inconsistent. "
+                    "Operator actions are disabled."
+                ),
+                critical=True,
+            )
+        )
     return issues
 
 

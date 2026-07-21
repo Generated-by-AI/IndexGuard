@@ -164,7 +164,7 @@
 .ig-chain-label,
 .ig-chain-detail {
   color: var(--ig-muted);
-  font-size: 0.75rem;
+  font-size: 0.8125rem;
 }
 
 .ig-chain-step strong {
@@ -307,7 +307,7 @@
 
 .ig-diff-location {
   color: var(--ig-muted);
-  font-size: 0.75rem;
+  font-size: 0.8125rem;
   margin-top: var(--ig-space-xs);
 }
 
@@ -446,6 +446,10 @@
 
   .ig-detail-head {
     grid-template-columns: 1fr;
+  }
+
+  .ig-detail-head > .ig-status {
+    justify-self: start;
   }
 
   .ig-detail-meta {

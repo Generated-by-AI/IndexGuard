@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from copy import deepcopy
+from typing import Any
+
 import httpx
 import pytest
 
@@ -84,6 +87,47 @@ def _client(handler, *, token: str | None = "operator-secret") -> DashboardApiCl
     )
 
 
+def _hold_command() -> OperatorCommand:
+    return OperatorCommand(
+        action=OperatorAction.HOLD,
+        actor="security-reviewer",
+        reason="Keep the candidate out of the index while evidence is reviewed.",
+        idempotency_key="hold-demo-0001",
+        expected_candidate_sha256=CANDIDATE_SHA,
+    )
+
+
+def _hold_outcome_payload() -> dict[str, object]:
+    return {
+        "analysis_id": "anl_demo",
+        "document_id": "expense-policy",
+        "candidate_sha256": CANDIDATE_SHA,
+        "indexed": False,
+        "chunk_count": 0,
+        "action": "HOLD",
+        "reason": "OPERATOR_HOLD",
+    }
+
+
+def _hold_result_payload(command: OperatorCommand) -> dict[str, Any]:
+    outcome = _hold_outcome_payload()
+    status = _status_payload()
+    status.update(
+        {
+            "state": "HOLD",
+            "latest_outcome": outcome,
+            "allowed_commands": ["REANALYZE"],
+        }
+    )
+    return {
+        "command": command.model_dump(mode="json"),
+        "status": status,
+        "outcome": outcome,
+        "replacement_analysis_id": None,
+        "idempotent_replay": False,
+    }
+
+
 def test_health_and_list_analyses_validate_gateway_payloads() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/health":
@@ -135,13 +179,7 @@ def test_prepare_sends_files_and_never_adds_operator_token() -> None:
 
 
 def test_dispatch_and_command_use_operator_authority_without_policy_fields() -> None:
-    command = OperatorCommand(
-        action=OperatorAction.HOLD,
-        actor="security-reviewer",
-        reason="Keep the candidate out of the index while evidence is reviewed.",
-        idempotency_key="hold-demo-0001",
-        expected_candidate_sha256=CANDIDATE_SHA,
-    )
+    command = _hold_command()
 
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.headers["X-IndexGuard-Operator-Token"] == "operator-secret"
@@ -152,22 +190,293 @@ def test_dispatch_and_command_use_operator_authority_without_policy_fields() -> 
         assert b'"action":"HOLD"' in payload
         assert b"risk_score" not in payload
         assert b'"decision"' not in payload
-        return httpx.Response(
-            200,
-            json={
-                "command": command.model_dump(mode="json"),
-                "status": _status_payload(),
-                "outcome": None,
-                "replacement_analysis_id": None,
-                "idempotent_replay": False,
-            },
-        )
+        return httpx.Response(200, json=_hold_result_payload(command))
 
     client = _client(handler)
 
     assert client.dispatch_analysis("anl_demo").analysis_id == "anl_demo"
-    result = client.execute_command("anl_demo", command)
+    result = client.execute_command(
+        "anl_demo",
+        command,
+        expected_document_id="expense-policy",
+    )
     assert result.command.action is OperatorAction.HOLD
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        "command",
+        "status_analysis",
+        "status_document",
+        "status_candidate",
+        "outcome_analysis",
+        "outcome_document",
+        "outcome_candidate",
+        "status_outcome_candidate",
+        "unexpected_replacement",
+    ],
+)
+def test_command_result_is_bound_to_submitted_authority(tamper: str) -> None:
+    command = _hold_command()
+    payload = deepcopy(_hold_result_payload(command))
+    if tamper == "command":
+        payload["command"]["actor"] = "different-actor"
+    elif tamper == "status_analysis":
+        payload["status"]["analysis_id"] = "anl_other"
+    elif tamper == "status_document":
+        payload["status"]["document_id"] = "other-document"
+    elif tamper == "status_candidate":
+        payload["status"]["candidate_sha256"] = "c" * 64
+    elif tamper == "outcome_analysis":
+        payload["outcome"]["analysis_id"] = "anl_other"
+    elif tamper == "outcome_document":
+        payload["outcome"]["document_id"] = "other-document"
+    elif tamper == "outcome_candidate":
+        payload["outcome"]["candidate_sha256"] = "c" * 64
+    elif tamper == "status_outcome_candidate":
+        status_outcome = deepcopy(payload["status"]["latest_outcome"])
+        status_outcome["candidate_sha256"] = "c" * 64
+        payload["status"]["latest_outcome"] = status_outcome
+    else:
+        payload["replacement_analysis_id"] = "anl_unexpected"
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    with pytest.raises(DashboardApiError) as caught:
+        _client(handler).execute_command(
+            "anl_demo",
+            command,
+            expected_document_id="expense-policy",
+        )
+
+    assert caught.value.code == "INVALID_GATEWAY_RESPONSE"
+
+
+def test_non_replay_hold_result_must_match_current_status_outcome() -> None:
+    command = _hold_command()
+    payload = deepcopy(_hold_result_payload(command))
+    indexed_outcome = {
+        "analysis_id": "anl_demo",
+        "document_id": "expense-policy",
+        "candidate_sha256": CANDIDATE_SHA,
+        "indexed": True,
+        "chunk_count": 1,
+        "action": "INDEX",
+        "reason": "INDEXED",
+    }
+    payload["status"]["state"] = "INDEXED"
+    payload["status"]["latest_outcome"] = indexed_outcome
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    with pytest.raises(DashboardApiError) as caught:
+        _client(handler).execute_command(
+            "anl_demo",
+            command,
+            expected_document_id="expense-policy",
+        )
+
+    assert caught.value.code == "INVALID_GATEWAY_RESPONSE"
+
+
+def test_non_replay_approve_cannot_report_hold_as_success() -> None:
+    command = _hold_command().model_copy(update={"action": OperatorAction.APPROVE})
+    payload = _hold_result_payload(command)
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    with pytest.raises(DashboardApiError) as caught:
+        _client(handler).execute_command(
+            "anl_demo",
+            command,
+            expected_document_id="expense-policy",
+        )
+
+    assert caught.value.code == "INVALID_GATEWAY_RESPONSE"
+
+
+@pytest.mark.parametrize(
+    ("state", "action", "indexed"),
+    [
+        ("INDEXED", "INDEX", True),
+        ("QUARANTINED", "QUARANTINE", False),
+    ],
+)
+def test_non_replay_approve_accepts_success_or_fail_closed_outcome(
+    state: str,
+    action: str,
+    indexed: bool,
+) -> None:
+    command = _hold_command().model_copy(update={"action": OperatorAction.APPROVE})
+    outcome = {
+        "analysis_id": "anl_demo",
+        "document_id": "expense-policy",
+        "candidate_sha256": CANDIDATE_SHA,
+        "indexed": indexed,
+        "chunk_count": 1 if indexed else 0,
+        "action": action,
+        "reason": "INDEXED" if indexed else "FAIL_CLOSED",
+    }
+    status = _status_payload()
+    status.update({"state": state, "latest_outcome": outcome})
+    payload = {
+        "command": command.model_dump(mode="json"),
+        "status": status,
+        "outcome": outcome,
+        "replacement_analysis_id": None,
+        "idempotent_replay": False,
+    }
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    result = _client(handler).execute_command(
+        "anl_demo",
+        command,
+        expected_document_id="expense-policy",
+    )
+
+    assert result.status.state.value == state
+
+
+def test_idempotent_hold_replay_may_return_a_later_current_status() -> None:
+    command = _hold_command()
+    payload = deepcopy(_hold_result_payload(command))
+    payload["idempotent_replay"] = True
+    payload["status"]["state"] = "INDEXED"
+    payload["status"]["latest_outcome"] = {
+        "analysis_id": "anl_demo",
+        "document_id": "expense-policy",
+        "candidate_sha256": CANDIDATE_SHA,
+        "indexed": True,
+        "chunk_count": 1,
+        "action": "INDEX",
+        "reason": "INDEXED_AFTER_ORIGINAL_HOLD",
+    }
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    result = _client(handler).execute_command(
+        "anl_demo",
+        command,
+        expected_document_id="expense-policy",
+    )
+
+    assert result.idempotent_replay is True
+    assert result.status.state.value == "INDEXED"
+    assert result.outcome is not None and result.outcome.action.value == "HOLD"
+
+
+def test_non_replay_approve_rejects_mismatched_terminal_state() -> None:
+    command = _hold_command().model_copy(update={"action": OperatorAction.APPROVE})
+    outcome = {
+        "analysis_id": "anl_demo",
+        "document_id": "expense-policy",
+        "candidate_sha256": CANDIDATE_SHA,
+        "indexed": True,
+        "chunk_count": 1,
+        "action": "INDEX",
+        "reason": "INDEXED",
+    }
+    status = _status_payload()
+    status.update({"state": "QUARANTINED", "latest_outcome": outcome})
+    payload = {
+        "command": command.model_dump(mode="json"),
+        "status": status,
+        "outcome": outcome,
+        "replacement_analysis_id": None,
+        "idempotent_replay": False,
+    }
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    with pytest.raises(DashboardApiError) as caught:
+        _client(handler).execute_command(
+            "anl_demo",
+            command,
+            expected_document_id="expense-policy",
+        )
+
+    assert caught.value.code == "INVALID_GATEWAY_RESPONSE"
+
+
+def test_replay_still_validates_original_command_outcome() -> None:
+    command = _hold_command().model_copy(update={"action": OperatorAction.APPROVE})
+    payload = _hold_result_payload(command)
+    payload["idempotent_replay"] = True
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    with pytest.raises(DashboardApiError) as caught:
+        _client(handler).execute_command(
+            "anl_demo",
+            command,
+            expected_document_id="expense-policy",
+        )
+
+    assert caught.value.code == "INVALID_GATEWAY_RESPONSE"
+
+
+def test_reanalysis_result_rejects_original_analysis_as_replacement() -> None:
+    command = _hold_command().model_copy(update={"action": OperatorAction.REANALYZE})
+    payload = _hold_result_payload(command)
+    payload["status"]["state"] = "SUPERSEDED"
+    payload["replacement_analysis_id"] = "anl_demo"
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    with pytest.raises(DashboardApiError) as caught:
+        _client(handler).execute_command(
+            "anl_demo",
+            command,
+            expected_document_id="expense-policy",
+        )
+
+    assert caught.value.code == "INVALID_GATEWAY_RESPONSE"
+
+
+def test_reanalysis_result_requires_a_distinct_replacement() -> None:
+    command = _hold_command().model_copy(update={"action": OperatorAction.REANALYZE})
+    payload = _hold_result_payload(command)
+    payload["status"]["state"] = "SUPERSEDED"
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    with pytest.raises(DashboardApiError) as caught:
+        _client(handler).execute_command(
+            "anl_demo",
+            command,
+            expected_document_id="expense-policy",
+        )
+
+    assert caught.value.code == "INVALID_GATEWAY_RESPONSE"
+
+
+def test_reanalysis_result_accepts_a_distinct_bound_replacement() -> None:
+    command = _hold_command().model_copy(update={"action": OperatorAction.REANALYZE})
+    payload = _hold_result_payload(command)
+    payload["status"]["state"] = "SUPERSEDED"
+    payload["replacement_analysis_id"] = "anl_replacement"
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    result = _client(handler).execute_command(
+        "anl_demo",
+        command,
+        expected_document_id="expense-policy",
+    )
+
+    assert result.replacement_analysis_id == "anl_replacement"
 
 
 def test_gateway_error_envelope_is_preserved_for_actionable_ui_copy() -> None:
