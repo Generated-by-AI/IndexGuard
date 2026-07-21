@@ -144,6 +144,19 @@ def test_health_and_list_analyses_validate_gateway_payloads() -> None:
     assert statuses[0].candidate_sha256 == CANDIDATE_SHA
 
 
+def test_health_rejects_non_authoritative_status_strings() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"status": "not ok", "service": "document-gateway"},
+        )
+
+    with pytest.raises(DashboardApiError) as caught:
+        _client(handler).health()
+
+    assert caught.value.code == "INVALID_GATEWAY_RESPONSE"
+
+
 def test_get_analysis_sends_operator_token_and_validates_contract() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/api/v1/analyses/anl_demo"
@@ -176,6 +189,110 @@ def test_prepare_sends_files_and_never_adds_operator_token() -> None:
     )
 
     assert analysis.analysis_id == "anl_demo"
+
+
+def test_search_validates_operator_auth_score_query_scope_and_current_sha() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v1/index/search"
+        assert request.headers["X-IndexGuard-Operator-Token"] == "operator-secret"
+        assert request.url.params["q"] == "승인 한도"
+        assert request.url.params["document_id"] == "expense-policy"
+        return httpx.Response(
+            200,
+            json={
+                "query": "승인 한도",
+                "document_id": "expense-policy",
+                "current_sha256": CANDIDATE_SHA,
+                "results": [
+                    {
+                        "document_id": "expense-policy",
+                        "sha256": CANDIDATE_SHA,
+                        "chunk_index": 3,
+                        "text": "승인 한도는 1억 원이다.",
+                        "score": 4.0,
+                    }
+                ],
+            },
+        )
+
+    result = _client(handler).search(
+        "승인 한도",
+        limit=5,
+        document_id="expense-policy",
+    )
+
+    assert result.current_sha256 == CANDIDATE_SHA
+    assert result.results[0].score == 4.0
+    assert result.results[0].chunk_index == 3
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    ["query", "scope", "document", "current_sha", "missing_score", "too_many"],
+)
+def test_search_rejects_authority_drift_and_incomplete_hits(tamper: str) -> None:
+    hit = {
+        "document_id": "expense-policy",
+        "sha256": CANDIDATE_SHA,
+        "chunk_index": 0,
+        "text": "승인 한도",
+        "score": 1.0,
+    }
+    payload: dict[str, object] = {
+        "query": "승인 한도",
+        "document_id": "expense-policy",
+        "current_sha256": CANDIDATE_SHA,
+        "results": [hit],
+    }
+    if tamper == "query":
+        payload["query"] = "different query"
+    elif tamper == "scope":
+        payload["document_id"] = "other-document"
+    elif tamper == "document":
+        hit["document_id"] = "other-document"
+    elif tamper == "current_sha":
+        payload["current_sha256"] = BASELINE_SHA
+    elif tamper == "missing_score":
+        del hit["score"]
+    else:
+        payload["results"] = [dict(hit, chunk_index=index) for index in range(6)]
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    with pytest.raises(DashboardApiError) as caught:
+        _client(handler).search("승인 한도", limit=5, document_id="expense-policy")
+
+    assert caught.value.code == "INVALID_GATEWAY_RESPONSE"
+
+
+def test_current_index_read_is_authenticated_correlated_and_slash_safe() -> None:
+    document_id = "policy/2026"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v1/index/current"
+        assert request.url.params["document_id"] == document_id
+        assert request.headers["X-IndexGuard-Operator-Token"] == "operator-secret"
+        return httpx.Response(
+            200,
+            json={"document_id": document_id, "sha256": CANDIDATE_SHA},
+        )
+
+    current = _client(handler).get_current_index(document_id)
+
+    assert current.sha256 == CANDIDATE_SHA
+
+
+def test_protected_index_reads_require_dashboard_operator_token() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        raise AssertionError("request must not be sent without an operator token")
+
+    client = _client(handler, token=None)
+
+    with pytest.raises(DashboardApiError, match="operator token"):
+        client.search("승인", document_id="expense-policy")
+    with pytest.raises(DashboardApiError, match="operator token"):
+        client.get_current_index("expense-policy")
 
 
 def test_dispatch_and_command_use_operator_authority_without_policy_fields() -> None:

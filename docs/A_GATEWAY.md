@@ -220,7 +220,8 @@ MCP에는 원본 blob, 임의 파일 경로, RAG 검색/색인, `APPROVE / HOLD 
 | `POST /api/v1/analyses/{id}/dispatch` | `X-IndexGuard-Operator-Token` | 설정된 B HTTP 서비스 호출 |
 | `POST /api/v1/analyses/{id}/commands` | `X-IndexGuard-Operator-Token` | C 운영 명령 |
 | `GET /api/v1/analyses/{id}` | B 또는 C 토큰 | 전체 준비 레코드 조회 |
-| `GET /api/v1/index/search?q=...` | 데모 조회 | 현재 승인 색인 검색 |
+| `GET /api/v1/index/search?q=...&document_id=...` | `X-IndexGuard-Operator-Token` | 현재 승인 색인과 조회 시점 SHA 검색 |
+| `GET /api/v1/index/current?document_id=...` | `X-IndexGuard-Operator-Token` | 문서의 현재 승인 색인 SHA 조회 |
 | `POST /api/v1/analyses/{id}/finalize` | B 토큰 | 하위 호환 전용, deprecated; 직접 색인 불가 |
 
 ## 보안 불변식
@@ -237,3 +238,6 @@ MCP에는 원본 blob, 임의 파일 경로, RAG 검색/색인, `APPROVE / HOLD 
 - indexer 오류는 transaction rollback 후 청크 `0`을 보장합니다.
 - 보류·격리는 후보 청크를 제거하고 이전에 승인된 안전 버전을 유지합니다.
 - 감사 이벤트는 `previous_hash`와 `event_hash`로 연결됩니다.
+- 색인 검색과 current SHA 조회는 C 운영 토큰 없이는 노출하지 않습니다.
+- `q`는 1–2,000자, `document_id`는 1–200자입니다. 문서 ID는 `/`를 포함할 수 있으므로 current 조회는 path segment가 아닌 query parameter를 사용합니다.
+- 문서 범위 검색은 current SHA와 검색 행을 한 indexer lock에서 읽고, 모든 결과를 해당 문서·SHA에 결속합니다.

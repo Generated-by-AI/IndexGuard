@@ -6,6 +6,7 @@ from copy import deepcopy
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Thread
+from urllib.parse import parse_qs, unquote, urlsplit
 
 import pytest
 
@@ -15,6 +16,7 @@ from streamlit.testing.v1 import AppTest
 from apps.dashboard.api_client import DashboardApiError
 from apps.dashboard.app import (
     _command_failure_is_definitive,
+    _current_search_result,
     _fetch_verified_replacement,
     _finalize_command_navigation,
 )
@@ -107,6 +109,31 @@ _REQUESTED_ANALYSIS = {
     "analysis_attempt": 1,
     "supersedes_analysis_id": None,
 }
+
+_INDEXED_STATUS = deepcopy(_REQUESTED_STATUS)
+_INDEXED_OUTCOME = {
+    "analysis_id": "anl_demo",
+    "document_id": "구매승인-한도-조정안",
+    "candidate_sha256": "b" * 64,
+    "indexed": True,
+    "chunk_count": 1,
+    "action": "INDEX",
+    "reason": "POLICY_ALLOW_INDEXED",
+}
+_INDEXED_STATUS.update(
+    {
+        "state": "INDEXED",
+        "latest_policy": {
+            "decision": "ALLOW",
+            "risk_score": 0,
+            "findings": [],
+            "index_action": "INDEX",
+            "candidate_sha256": "b" * 64,
+        },
+        "latest_outcome": _INDEXED_OUTCOME,
+        "allowed_commands": ["REANALYZE"],
+    }
+)
 
 
 class _ReplacementClient:
@@ -224,6 +251,37 @@ def test_command_navigation_mutates_session_only_after_replacement_verification(
     assert nonreplacement_session == {"selected_analysis_id": "anl_demo"}
 
 
+def test_cached_raw_search_must_match_live_document_and_current_sha() -> None:
+    stored = {
+        "query": "승인 한도",
+        "document_id": "구매승인-한도-조정안",
+        "current_sha256": "b" * 64,
+        "results": [
+            {
+                "document_id": "구매승인-한도-조정안",
+                "sha256": "b" * 64,
+                "chunk_index": 0,
+                "text": "부서장 전결 한도는 1억 원이다.",
+                "score": 4.0,
+            }
+        ],
+    }
+
+    current = _current_search_result(
+        stored,
+        expected_document_id="구매승인-한도-조정안",
+        current_sha256="b" * 64,
+    )
+    stale = _current_search_result(
+        stored,
+        expected_document_id="구매승인-한도-조정안",
+        current_sha256="c" * 64,
+    )
+
+    assert current is not None
+    assert stale is None
+
+
 class _RequestedGatewayHandler(_EmptyGatewayHandler):
     def do_GET(self) -> None:  # noqa: N802 - stdlib callback name
         if self.path.startswith("/api/v1/analyses?"):
@@ -236,6 +294,82 @@ class _RequestedGatewayHandler(_EmptyGatewayHandler):
             self._json(200, _REQUESTED_ANALYSIS)
             return
         super().do_GET()
+
+
+class _AuthorityMismatchGatewayHandler(_RequestedGatewayHandler):
+    current_index_reads = 0
+
+    def do_GET(self) -> None:  # noqa: N802 - stdlib callback name
+        if self.path == "/api/v1/analyses/anl_demo/status":
+            status = deepcopy(_REQUESTED_STATUS)
+            status["audit_chain_valid"] = False
+            self._json(200, status)
+            return
+        if unquote(urlsplit(self.path).path) == "/api/v1/index/current":
+            type(self).current_index_reads += 1
+            self._json(
+                200,
+                {"document_id": "구매승인-한도-조정안", "sha256": None},
+            )
+            return
+        super().do_GET()
+
+
+class _RagGatewayHandler(_EmptyGatewayHandler):
+    model_calls = 0
+
+    def do_GET(self) -> None:  # noqa: N802 - stdlib callback name
+        if self.path.startswith("/api/v1/analyses?"):
+            self._json(200, [_INDEXED_STATUS])
+            return
+        if self.path == "/api/v1/analyses/anl_demo/status":
+            self._json(200, _INDEXED_STATUS)
+            return
+        if self.path == "/api/v1/analyses/anl_demo":
+            self._json(200, _REQUESTED_ANALYSIS)
+            return
+        if unquote(urlsplit(self.path).path) == "/api/v1/index/current":
+            assert self.headers["X-IndexGuard-Operator-Token"] == "test-operator-token"
+            assert parse_qs(urlsplit(self.path).query)["document_id"] == ["구매승인-한도-조정안"]
+            self._json(
+                200,
+                {"document_id": "구매승인-한도-조정안", "sha256": "b" * 64},
+            )
+            return
+        if self.path.startswith("/api/v1/index/search?"):
+            assert self.headers["X-IndexGuard-Operator-Token"] == "test-operator-token"
+            query = parse_qs(urlsplit(self.path).query)["q"][0]
+            self._json(
+                200,
+                {
+                    "query": query,
+                    "document_id": "구매승인-한도-조정안",
+                    "current_sha256": "b" * 64,
+                    "results": [
+                        {
+                            "document_id": "구매승인-한도-조정안",
+                            "sha256": "b" * 64,
+                            "chunk_index": 0,
+                            "text": "부서장 전결 한도는 1억 원이다.",
+                            "score": 4.0,
+                        }
+                    ],
+                },
+            )
+            return
+        super().do_GET()
+
+    def do_POST(self) -> None:  # noqa: N802 - stdlib callback name
+        if self.path == "/v1/chat/completions":
+            content_length = int(self.headers.get("Content-Length", "0"))
+            self.rfile.read(content_length)
+            type(self).model_calls += 1
+            self._json(
+                200,
+                {"choices": [{"message": {"content": "부서장 전결 한도는 1억 원입니다 [S1]."}}]},
+            )
+            return
+        self._json(404, {"error": {"code": "NOT_FOUND", "message": "not found"}})
 
 
 @contextmanager
@@ -254,6 +388,34 @@ def _empty_gateway():
 @contextmanager
 def _requested_gateway():
     server = ThreadingHTTPServer(("127.0.0.1", 0), _RequestedGatewayHandler)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+@contextmanager
+def _authority_mismatch_gateway():
+    _AuthorityMismatchGatewayHandler.current_index_reads = 0
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _AuthorityMismatchGatewayHandler)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+@contextmanager
+def _rag_gateway():
+    _RagGatewayHandler.model_calls = 0
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _RagGatewayHandler)
     thread = Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -292,6 +454,63 @@ def test_app_offers_dispatch_for_pending_analysis(monkeypatch) -> None:
 
     assert not app.exception
     assert any(button.label == "Send pending request to B" for button in app.button)
+
+
+def test_authority_failure_disables_protected_rag_before_index_read(monkeypatch) -> None:
+    with _authority_mismatch_gateway() as api_url:
+        monkeypatch.setenv("INDEXGUARD_API_URL", api_url)
+        monkeypatch.setenv("INDEXGUARD_OPERATOR_TOKEN", "test-operator-token")
+        app = AppTest.from_file(str(_APP), default_timeout=10)
+        app.session_state["selected_analysis_id"] = "anl_demo"
+        app.run()
+
+    assert not app.exception
+    assert _AuthorityMismatchGatewayHandler.current_index_reads == 0
+    assert not any(item.label == "Question for approved evidence" for item in app.text_area)
+    assert any("Protected RAG is disabled" in message.value for message in app.error)
+
+
+def test_app_opens_valid_analysis_deep_link(monkeypatch) -> None:
+    with _requested_gateway() as api_url:
+        monkeypatch.setenv("INDEXGUARD_API_URL", api_url)
+        monkeypatch.setenv("INDEXGUARD_OPERATOR_TOKEN", "test-operator-token")
+        app = AppTest.from_file(str(_APP), default_timeout=10)
+        app.query_params["analysis"] = "anl_demo"
+        app.run()
+
+    assert not app.exception
+    assert any(button.label == "Send pending request to B" for button in app.button)
+    assert not any("Select an analysis" in message.value for message in app.info)
+
+
+def test_app_runs_protected_rag_question_into_source_ledger(monkeypatch) -> None:
+    with _rag_gateway() as api_url:
+        monkeypatch.setenv("INDEXGUARD_API_URL", api_url)
+        monkeypatch.setenv("INDEXGUARD_OPERATOR_TOKEN", "test-operator-token")
+        monkeypatch.setenv("INDEXGUARD_OPENAI_BASE_URL", f"{api_url}/v1")
+        monkeypatch.setenv("INDEXGUARD_OPENAI_MODEL", "demo-model")
+        app = AppTest.from_file(str(_APP), default_timeout=10)
+        app.session_state["selected_analysis_id"] = "anl_demo"
+        app.run()
+        question = next(
+            item for item in app.text_area if item.label == "Question for approved evidence"
+        )
+        assert any(
+            "retrieved chunks" in item.value and "configured model endpoint" in item.value
+            for item in app.caption
+        )
+        submit = next(button for button in app.button if button.label == "Ask indexed evidence")
+        question.input("전결 한도는 얼마인가요?")
+        submit.click()
+        app.run()
+
+    assert not app.exception
+    assert _RagGatewayHandler.model_calls == 1
+    stored = app.session_state["rag_chat_구매승인-한도-조정안"]
+    assert stored[0]["question"] == "전결 한도는 얼마인가요?"
+    assert stored[0]["answer"] == "부서장 전결 한도는 1억 원입니다 [S1]."
+    assert stored[0]["index_sha256"] == "b" * 64
+    assert stored[0]["citations"][0]["score"] == 4.0
 
 
 def test_app_does_not_open_an_implicit_first_queue_row(monkeypatch) -> None:

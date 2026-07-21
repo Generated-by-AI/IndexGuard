@@ -64,6 +64,7 @@ def test_clean_hwpx_reaches_approval_then_indexes_only_after_c_command(tmp_path)
         )
         before_approval = client.get(
             "/api/v1/index/search",
+            headers={"X-IndexGuard-Operator-Token": "operator-secret"},
             params={"q": "1,000만 원", "document_id": "clean-policy"},
         )
         approve = client.post(
@@ -79,6 +80,7 @@ def test_clean_hwpx_reaches_approval_then_indexes_only_after_c_command(tmp_path)
         )
         after_approval = client.get(
             "/api/v1/index/search",
+            headers={"X-IndexGuard-Operator-Token": "operator-secret"},
             params={"q": "1,000만 원", "document_id": "clean-policy"},
         )
 
@@ -106,6 +108,7 @@ def test_attacked_hwpx_is_quarantined_and_never_searchable(tmp_path) -> None:
         )
         search = client.get(
             "/api/v1/index/search",
+            headers={"X-IndexGuard-Operator-Token": "operator-secret"},
             params={"q": "1억 원", "document_id": "attacked-policy"},
         )
 

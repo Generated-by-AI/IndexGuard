@@ -5,6 +5,7 @@ from __future__ import annotations
 from html import escape
 
 from apps.dashboard.presentation import format_timestamp, short_hash, state_label, state_tone
+from apps.dashboard.rag_chat import RagExchange
 from indexguard.contracts import (
     AnalysisStatusView,
     ChangeKind,
@@ -144,6 +145,47 @@ def render_provenance_chain(
         f"<ol>{items}</ol>"
         f'<p class="ig-chain-audit ig-tone-{audit_tone}">{escape(audit)}</p>'
         "</section>"
+    )
+
+
+def render_rag_exchange(exchange: RagExchange, *, sequence: int) -> str:
+    """Render one escaped Q/A entry with its retrieved source ledger."""
+
+    label = f"{sequence:02d}"
+    answer = escape(exchange.answer).replace("\n", "<br>")
+    source_rows = "".join(
+        (
+            '<li class="ig-rag-source">'
+            '<div class="ig-rag-source-head">'
+            f"<strong>[S{index}]</strong><span>{escape(hit.document_id)} · "
+            f"chunk {hit.chunk_index} · sha {escape(short_hash(hit.sha256))}</span>"
+            f'<span class="ig-rag-score">score {hit.score:.2f}</span>'
+            "</div>"
+            f"<p>{escape(hit.text)}</p>"
+            "</li>"
+        )
+        for index, hit in enumerate(exchange.citations, start=1)
+    )
+    sources = (
+        f'<ol class="ig-rag-sources" aria-label="Retrieved source ledger">{source_rows}</ol>'
+        if source_rows
+        else '<p class="ig-rag-no-source">No approved indexed source matched.</p>'
+    )
+    mode = (
+        "Generated explanation · verify against sources" if exchange.generated else "No model call"
+    )
+    return (
+        '<article class="ig-rag-exchange">'
+        '<div class="ig-rag-question">'
+        f'<span class="ig-rag-sequence">Q {label}</span>'
+        f"<p>{escape(exchange.question)}</p>"
+        "</div>"
+        '<div class="ig-rag-answer">'
+        f'<span class="ig-rag-sequence">A {label}</span>'
+        f'<div><p>{answer}</p><span class="ig-rag-mode">{escape(mode)}</span></div>'
+        "</div>"
+        f"{sources}"
+        "</article>"
     )
 
 

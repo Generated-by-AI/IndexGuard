@@ -417,6 +417,14 @@ class SqliteIndexer:
         the gate.
         """
 
+        if sha256 is None:
+            _, hits = self.search_current_snapshot(
+                query,
+                limit=limit,
+                document_id=document_id,
+            )
+            return hits
+
         if limit <= 0:
             raise ValueError("limit must be positive")
         stripped_query = query.strip()
@@ -425,11 +433,8 @@ class SqliteIndexer:
 
         clauses = ["1 = 1"]
         parameters: list[str] = []
-        if sha256 is None:
-            clauses.append("d.is_current = 1")
-        else:
-            clauses.append("c.sha256 = ?")
-            parameters.append(sha256)
+        clauses.append("c.sha256 = ?")
+        parameters.append(sha256)
         if document_id is not None:
             clauses.append("c.document_id = ?")
             parameters.append(document_id)
@@ -446,28 +451,53 @@ class SqliteIndexer:
                 parameters,
             ).fetchall()
 
-        query_lower = stripped_query.casefold()
-        terms = _tokenize(query_lower)
-        hits: list[SearchHit] = []
-        for row in rows:
-            text = str(row["text"])
-            text_lower = text.casefold()
-            phrase_score = float(text_lower.count(query_lower) * 3)
-            term_score = float(sum(text_lower.count(term) for term in terms))
-            score = phrase_score + term_score
-            if score <= 0:
-                continue
-            hits.append(
-                SearchHit(
-                    document_id=str(row["document_id"]),
-                    sha256=str(row["sha256"]),
-                    chunk_index=int(row["chunk_index"]),
-                    text=text,
-                    score=score,
-                )
-            )
-        hits.sort(key=lambda hit: (-hit.score, hit.document_id, hit.chunk_index))
-        return hits[:limit]
+        return _score_rows(rows, stripped_query, limit)
+
+    def search_current_snapshot(
+        self,
+        query: str,
+        *,
+        limit: int = 5,
+        document_id: str | None = None,
+    ) -> tuple[str | None, list[SearchHit]]:
+        """Return one locked current-index identity and its lexical hits."""
+
+        if limit <= 0:
+            raise ValueError("limit must be positive")
+        stripped_query = query.strip()
+        if not stripped_query:
+            return None, []
+
+        clauses = ["d.is_current = 1"]
+        parameters: list[str] = []
+        if document_id is not None:
+            clauses.append("c.document_id = ?")
+            parameters.append(document_id)
+
+        with self._lock:
+            current_row = None
+            if document_id is not None:
+                current_row = self._connection.execute(
+                    """
+                    SELECT sha256
+                    FROM indexed_documents
+                    WHERE document_id = ? AND is_current = 1
+                    """,
+                    (document_id,),
+                ).fetchone()
+            rows = self._connection.execute(
+                f"""
+                SELECT c.document_id, c.sha256, c.chunk_index, c.text
+                FROM indexed_chunks AS c
+                JOIN indexed_documents AS d
+                  ON d.document_id = c.document_id AND d.sha256 = c.sha256
+                WHERE {" AND ".join(clauses)}
+                """,
+                parameters,
+            ).fetchall()
+
+        current_sha256 = None if current_row is None else str(current_row["sha256"])
+        return current_sha256, _score_rows(rows, stripped_query, limit)
 
     def close(self) -> None:
         with self._lock:
@@ -478,6 +508,31 @@ class SqliteIndexer:
 
     def __exit__(self, *_args: object) -> None:
         self.close()
+
+
+def _score_rows(rows: list[sqlite3.Row], query: str, limit: int) -> list[SearchHit]:
+    query_lower = query.casefold()
+    terms = _tokenize(query_lower)
+    hits: list[SearchHit] = []
+    for row in rows:
+        text = str(row["text"])
+        text_lower = text.casefold()
+        phrase_score = float(text_lower.count(query_lower) * 3)
+        term_score = float(sum(text_lower.count(term) for term in terms))
+        score = phrase_score + term_score
+        if score <= 0:
+            continue
+        hits.append(
+            SearchHit(
+                document_id=str(row["document_id"]),
+                sha256=str(row["sha256"]),
+                chunk_index=int(row["chunk_index"]),
+                text=text,
+                score=score,
+            )
+        )
+    hits.sort(key=lambda hit: (-hit.score, hit.document_id, hit.chunk_index))
+    return hits[:limit]
 
 
 def _version_from_row(row: sqlite3.Row) -> IndexedVersion:
