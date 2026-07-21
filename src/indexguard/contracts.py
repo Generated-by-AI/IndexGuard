@@ -208,6 +208,43 @@ class IndexOutcome(StrictModel):
     reason: str
 
 
+class IndexSearchHit(StrictModel):
+    document_id: str = Field(min_length=1, max_length=200)
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    chunk_index: int = Field(ge=0)
+    text: str = Field(min_length=1, max_length=16_000)
+    score: float = Field(gt=0, allow_inf_nan=False)
+
+
+class CurrentIndexView(StrictModel):
+    document_id: str = Field(min_length=1, max_length=200)
+    sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+
+
+class IndexSearchResponse(StrictModel):
+    query: str = Field(min_length=1, max_length=2_000)
+    document_id: str | None = Field(default=None, min_length=1, max_length=200)
+    current_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    results: list[IndexSearchHit] = Field(max_length=50)
+
+    @model_validator(mode="after")
+    def validate_index_generation(self) -> IndexSearchResponse:
+        if self.document_id is None:
+            if self.current_sha256 is not None:
+                raise ValueError("cross-document search cannot claim one current SHA")
+        else:
+            if self.results and self.current_sha256 is None:
+                raise ValueError("scoped search hits require a current SHA")
+            if any(hit.document_id != self.document_id for hit in self.results):
+                raise ValueError("search hit document does not match response scope")
+            if any(hit.sha256 != self.current_sha256 for hit in self.results):
+                raise ValueError("search hit SHA does not match the current index")
+        identities = {(hit.document_id, hit.sha256, hit.chunk_index) for hit in self.results}
+        if len(identities) != len(self.results):
+            raise ValueError("duplicate search hit identity")
+        return self
+
+
 class RiskAnalysisRequest(StrictModel):
     """Sanitized, immutable payload that A hands to the B risk service."""
 

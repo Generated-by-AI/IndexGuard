@@ -219,12 +219,36 @@ def test_fastapi_prepare_finalize_and_search(tmp_path) -> None:
         assert approve_response.json()["status"]["state"] == "INDEXED"
         assert approve_response.json()["outcome"]["indexed"] is True
 
-        search_response = client.get(
+        missing_token = client.get(
             "/api/v1/index/search",
             params={"q": "1억 원", "document_id": "policy"},
         )
+        wrong_token = client.get(
+            "/api/v1/index/search",
+            headers={"X-IndexGuard-Operator-Token": "wrong-token"},
+            params={"q": "1억 원", "document_id": "policy"},
+        )
+        search_response = client.get(
+            "/api/v1/index/search",
+            headers={"X-IndexGuard-Operator-Token": "test-operator-token"},
+            params={"q": "1억 원", "document_id": "policy"},
+        )
+        current_response = client.get(
+            "/api/v1/index/current/policy",
+            headers={"X-IndexGuard-Operator-Token": "test-operator-token"},
+        )
+        assert missing_token.status_code == 401
+        assert wrong_token.status_code == 401
         assert search_response.status_code == 200
-        assert search_response.json()["results"]
+        search_payload = search_response.json()
+        assert search_payload["document_id"] == "policy"
+        assert search_payload["current_sha256"] == prepared["candidate"]["sha256"]
+        assert search_payload["results"]
+        assert current_response.status_code == 200
+        assert current_response.json() == {
+            "document_id": "policy",
+            "sha256": prepared["candidate"]["sha256"],
+        }
 
 
 def test_fastapi_contract_validation_is_fail_closed(tmp_path) -> None:
@@ -249,14 +273,21 @@ def test_fastapi_contract_validation_is_fail_closed(tmp_path) -> None:
 
 
 def test_fastapi_unexpected_errors_keep_the_fail_closed_contract(tmp_path, monkeypatch) -> None:
-    application = create_app(tmp_path / "runtime")
+    application = create_app(
+        tmp_path / "runtime",
+        operator_token="test-operator-token",
+    )
 
     def fail_search(*_args, **_kwargs):
         raise OSError("simulated storage failure")
 
-    monkeypatch.setattr(application.state.pipeline, "search", fail_search)
+    monkeypatch.setattr(application.state.pipeline, "search_snapshot", fail_search)
     with TestClient(application, raise_server_exceptions=False) as client:
-        response = client.get("/api/v1/index/search", params={"q": "policy"})
+        response = client.get(
+            "/api/v1/index/search",
+            headers={"X-IndexGuard-Operator-Token": "test-operator-token"},
+            params={"q": "policy"},
+        )
 
     assert response.status_code == 500
     payload = response.json()

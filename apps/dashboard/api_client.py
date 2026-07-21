@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from ipaddress import ip_address
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urlsplit
 
 import httpx
@@ -17,7 +17,10 @@ from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 
 from indexguard.contracts import (
     AnalysisStatusView,
+    CurrentIndexView,
     IndexAction,
+    IndexSearchHit,
+    IndexSearchResponse,
     OperatorAction,
     OperatorCommand,
     OperatorCommandResult,
@@ -33,20 +36,12 @@ class _StrictView(BaseModel):
 
 
 class HealthStatus(_StrictView):
-    status: str
-    service: str
+    status: Literal["ok"]
+    service: Literal["document-gateway"]
 
 
-class SearchHit(_StrictView):
-    document_id: str
-    sha256: str
-    chunk_index: int
-    text: str
-
-
-class SearchResponse(_StrictView):
-    query: str
-    results: list[SearchHit]
+SearchHit = IndexSearchHit
+SearchResponse = IndexSearchResponse
 
 
 @dataclass(frozen=True, slots=True)
@@ -196,8 +191,38 @@ class DashboardApiClient:
         params: dict[str, object] = {"q": query, "limit": limit}
         if document_id is not None:
             params["document_id"] = document_id
-        payload = self._request_json("GET", "/api/v1/index/search", params=params)
-        return self._validate(SearchResponse, payload)
+        payload = self._request_json(
+            "GET",
+            "/api/v1/index/search",
+            headers=self._operator_headers(),
+            params=params,
+        )
+        result = self._validate(SearchResponse, payload)
+        if (
+            result.query != query
+            or result.document_id != document_id
+            or len(result.results) > limit
+            or (
+                document_id is not None
+                and any(hit.document_id != document_id for hit in result.results)
+            )
+        ):
+            raise _invalid_response()
+        identities = {(hit.document_id, hit.sha256, hit.chunk_index) for hit in result.results}
+        if len(identities) != len(result.results):
+            raise _invalid_response()
+        return result
+
+    def get_current_index(self, document_id: str) -> CurrentIndexView:
+        payload = self._request_json(
+            "GET",
+            f"/api/v1/index/current/{document_id}",
+            headers=self._operator_headers(),
+        )
+        result = self._validate(CurrentIndexView, payload)
+        if result.document_id != document_id:
+            raise _invalid_response()
+        return result
 
     def _operator_headers(self) -> dict[str, str]:
         if self._operator_token is None:

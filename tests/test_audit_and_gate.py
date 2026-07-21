@@ -86,6 +86,32 @@ def policy(decision: Decision, action: IndexAction, sha256: str) -> PolicyResult
     )
 
 
+def test_search_snapshot_binds_hits_to_one_current_sha(tmp_path) -> None:
+    previous = make_snapshot(
+        document_id="policy",
+        payload=b"previous",
+        text="승인 기준 1,000만 원",
+    )
+    current = make_snapshot(
+        document_id="policy",
+        payload=b"current",
+        text="승인 기준 1억 원",
+    )
+
+    with SqliteIndexer(tmp_path / "index.db") as indexer:
+        indexer.index_atomic(previous)
+        indexer.index_atomic(current)
+
+        current_sha256, hits = indexer.search_current_snapshot(
+            "1억 원",
+            document_id="policy",
+        )
+
+    assert current_sha256 == current.sha256
+    assert hits
+    assert {hit.sha256 for hit in hits} == {current.sha256}
+
+
 def test_allow_indexes_atomically_and_records_audit(tmp_path) -> None:
     candidate_blob = tmp_path / "candidate.hwpx"
     candidate_blob.write_bytes(b"candidate")

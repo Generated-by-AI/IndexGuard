@@ -17,9 +17,11 @@ from fastapi.responses import JSONResponse
 from indexguard.contracts import (
     AnalysisStatus,
     AnalysisStatusView,
+    CurrentIndexView,
     Decision,
     Finding,
     IndexAction,
+    IndexSearchResponse,
     OperatorCommand,
     OperatorCommandResult,
     PolicyResult,
@@ -260,16 +262,40 @@ def create_app(
         )
         return pipeline.get_prepared(analysis_id)
 
-    @application.get("/api/v1/index/search")
+    @application.get("/api/v1/index/search", response_model=IndexSearchResponse)
     def search(
         q: Annotated[str, Query(min_length=1)],
         limit: Annotated[int, Query(ge=1, le=50)] = 5,
         document_id: str | None = None,
-    ) -> dict[str, object]:
-        return {
-            "query": q,
-            "results": pipeline.search(q, limit=limit, document_id=document_id),
-        }
+        x_indexguard_operator_token: Annotated[
+            str | None,
+            Header(alias="X-IndexGuard-Operator-Token"),
+        ] = None,
+    ) -> IndexSearchResponse:
+        _require_token(
+            x_indexguard_operator_token,
+            selected_operator_token,
+            role="C operator",
+        )
+        return pipeline.search_snapshot(q, limit=limit, document_id=document_id)
+
+    @application.get(
+        "/api/v1/index/current/{document_id}",
+        response_model=CurrentIndexView,
+    )
+    def current_index(
+        document_id: str,
+        x_indexguard_operator_token: Annotated[
+            str | None,
+            Header(alias="X-IndexGuard-Operator-Token"),
+        ] = None,
+    ) -> CurrentIndexView:
+        _require_token(
+            x_indexguard_operator_token,
+            selected_operator_token,
+            role="C operator",
+        )
+        return pipeline.current_index(document_id)
 
     return application
 

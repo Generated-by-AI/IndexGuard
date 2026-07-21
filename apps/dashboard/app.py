@@ -8,12 +8,14 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import MutableMapping
 from html import escape
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, cast
 from uuid import uuid4
 
 import streamlit as st
+from pydantic import ValidationError
 
 from apps.dashboard.api_client import (
     DashboardApiClient,
@@ -30,7 +32,18 @@ from apps.dashboard.presentation import (
     state_label,
     state_tone,
 )
-from apps.dashboard.renderers import render_diff, render_identity, render_provenance_chain
+from apps.dashboard.rag_chat import (
+    answer_from_protected_index,
+    append_exchange,
+    exchanges_for_current_index,
+    load_exchanges,
+)
+from apps.dashboard.renderers import (
+    render_diff,
+    render_identity,
+    render_provenance_chain,
+    render_rag_exchange,
+)
 from apps.dashboard.state import (
     authority_issues,
     can_dispatch_analysis,
@@ -45,6 +58,8 @@ from indexguard.contracts import (
     PreparedAnalysis,
     WorkflowState,
 )
+from indexguard.errors import IndexGuardError
+from indexguard.openai_compat import OpenAICompatibleClient, OpenAICompatibleSettings
 
 _CSS_PATH = Path(__file__).parent / "assets" / "indexguard.css"
 _SUPPORTED_SUFFIXES = {".pdf", ".docx", ".hwpx"}
@@ -62,6 +77,14 @@ class _SessionState(Protocol):
     def __setitem__(self, key: str, value: object) -> None: ...
 
 
+class _EnvironmentRagAnswerer:
+    """Resolve model configuration only after protected evidence is found."""
+
+    def answer_rag_question(self, **kwargs) -> str:
+        client = OpenAICompatibleClient(OpenAICompatibleSettings.from_environment())
+        return client.answer_rag_question(**kwargs)
+
+
 def main() -> None:
     st.set_page_config(page_title="IndexGuard evidence workbench", layout="wide")
     st.html(_CSS_PATH)
@@ -69,7 +92,7 @@ def main() -> None:
     try:
         client = DashboardApiClient.from_environment()
     except ValueError as exc:
-        _render_header(None, "Invalid gateway configuration")
+        _render_header(None, "Invalid gateway configuration", healthy=False)
         st.error(str(exc))
         return
 
@@ -81,7 +104,11 @@ def main() -> None:
     except DashboardApiError as exc:
         health_error = exc
 
-    _render_header(client.base_url, health_label or "Gateway unavailable")
+    _render_header(
+        client.base_url,
+        health_label or "Gateway unavailable",
+        healthy=health_error is None,
+    )
     _show_flash()
 
     toolbar_left, toolbar_right = st.columns([0.72, 0.28], gap="medium")
@@ -103,6 +130,12 @@ def main() -> None:
         st.info("Keep all candidates out of the index until the gateway state can be verified.")
         return
 
+    requested_analysis = st.query_params.get("analysis")
+    if isinstance(requested_analysis, str) and any(
+        status.analysis_id == requested_analysis for status in statuses
+    ):
+        st.session_state["selected_analysis_id"] = requested_analysis
+
     queue_column, detail_column = st.columns([0.42, 0.58], gap="medium")
     with queue_column:
         selected_id = _render_queue(statuses)
@@ -113,9 +146,9 @@ def main() -> None:
             _render_detail(client, selected_id)
 
 
-def _render_header(base_url: str | None, gateway_label: str) -> None:
+def _render_header(base_url: str | None, gateway_label: str, *, healthy: bool) -> None:
     endpoint = base_url or "not configured"
-    tone = "allow" if gateway_label.endswith("· ok") else "block"
+    tone = "allow" if healthy else "neutral"
     st.html(
         '<header class="ig-masthead">'
         '<h1 class="ig-brand">IndexGuard</h1>'
@@ -284,7 +317,7 @@ def _render_detail(client: DashboardApiClient, analysis_id: str) -> None:
         st.error(f"{issue.message} [{issue.code}]")
 
     changes_tab, findings_tab, identity_tab, actions_tab, retrieval_tab = st.tabs(
-        ["Changes", "Risk evidence", "Identity", "Operator actions", "Protected retrieval"]
+        ["Changes", "Risk evidence", "Identity", "Operator actions", "Protected RAG"]
     )
     with changes_tab:
         _render_changes(analysis)
@@ -295,7 +328,12 @@ def _render_detail(client: DashboardApiClient, analysis_id: str) -> None:
     with actions_tab:
         _render_actions(client, status, analysis)
     with retrieval_tab:
-        _render_retrieval(client, analysis)
+        if issues:
+            st.error(
+                "Protected RAG is disabled until A's analysis identities and audit chain validate."
+            )
+        else:
+            _render_retrieval(client, analysis)
 
 
 def _render_changes(analysis: PreparedAnalysis) -> None:
@@ -531,6 +569,96 @@ def _render_actions(
 
 
 def _render_retrieval(client: DashboardApiClient, analysis: PreparedAnalysis) -> None:
+    state_key = f"rag_chat_{analysis.document_id}"
+    session_state = cast(MutableMapping[str, object], st.session_state)
+    try:
+        current_index = client.get_current_index(analysis.document_id)
+    except DashboardApiError as exc:
+        _show_api_error("Protected RAG identity is unavailable", exc)
+        return
+    stored_exchanges = load_exchanges(session_state, state_key)
+    exchanges, hidden_count = exchanges_for_current_index(
+        stored_exchanges,
+        current_index.sha256,
+    )
+    if hidden_count:
+        session_state[state_key] = [item.model_dump(mode="json") for item in exchanges]
+        st.info(
+            f"{hidden_count} earlier conversation entr"
+            f"{'y was' if hidden_count == 1 else 'ies were'} removed from this session "
+            "because the approved index changed."
+        )
+    heading, controls = st.columns([0.78, 0.22], gap="small")
+    with heading:
+        st.markdown("### Ask indexed evidence")
+        st.caption(
+            "Current approved index only · selected document · source SHAs identify the "
+            "exact indexed version. Generated explanations are not policy decisions."
+        )
+    with controls:
+        if exchanges and st.button(
+            "Clear conversation",
+            key=f"clear_{state_key}",
+            width="stretch",
+        ):
+            st.session_state.pop(state_key, None)
+            st.rerun()
+
+    if exchanges:
+        for sequence, exchange in enumerate(exchanges, start=1):
+            st.html(render_rag_exchange(exchange, sequence=sequence))
+    else:
+        st.html(
+            '<section class="ig-rag-empty"><strong>No evidence questions yet</strong>'
+            "<span>Ask about the current approved index for this document. Every answer "
+            "will retain its retrieved source rows for manual verification.</span></section>"
+        )
+
+    st.caption(
+        "Submitting sends your question, same-version conversation context, and retrieved "
+        "chunks to the configured model endpoint. Source labels are not semantic verification."
+    )
+    with st.form(f"rag_chat_form_{analysis.document_id}", clear_on_submit=True):
+        question = st.text_area(
+            "Question for approved evidence",
+            placeholder="승인 한도와 필요한 사전 승인 절차는 무엇인가요?",
+            max_chars=2_000,
+            height=88,
+        )
+        submitted = st.form_submit_button("Ask indexed evidence", type="primary")
+    if submitted:
+        if not question.strip():
+            st.error("Enter a question for the approved index.")
+        else:
+            try:
+                with st.spinner(
+                    "Retrieving approved chunks and preparing a source-labelled answer…"
+                ):
+                    exchange = answer_from_protected_index(
+                        client,
+                        _EnvironmentRagAnswerer(),
+                        question=question,
+                        document_id=analysis.document_id,
+                        previous_exchanges=exchanges,
+                    )
+            except DashboardApiError as exc:
+                _show_api_error("Protected RAG is unavailable", exc)
+            except IndexGuardError as exc:
+                retry = " Retry after the model service recovers." if exc.retryable else ""
+                st.error(f"Answer generation is unavailable: {exc.message} [{exc.code}].{retry}")
+            else:
+                append_exchange(session_state, state_key, exchange)
+                st.rerun()
+
+    with st.expander("Inspect raw protected retrieval"):
+        _render_raw_retrieval(client, analysis, current_index.sha256)
+
+
+def _render_raw_retrieval(
+    client: DashboardApiClient,
+    analysis: PreparedAnalysis,
+    current_sha256: str | None,
+) -> None:
     st.caption(
         "Searches only A's protected index. An empty result is not evidence that a "
         "candidate is safe."
@@ -560,7 +688,18 @@ def _render_retrieval(client: DashboardApiClient, analysis: PreparedAnalysis) ->
     stored = st.session_state.get(state_key)
     if stored is None:
         return
-    result = SearchResponse.model_validate(stored)
+    result = _current_search_result(
+        stored,
+        expected_document_id=analysis.document_id,
+        current_sha256=current_sha256,
+    )
+    if result is None:
+        st.session_state.pop(state_key, None)
+        st.info(
+            "Stored retrieval was removed because it is not bound to the current approved "
+            "index. Run the search again."
+        )
+        return
     if not result.results:
         st.info("No indexed chunks matched this query for the selected document.")
         return
@@ -568,7 +707,8 @@ def _render_retrieval(client: DashboardApiClient, analysis: PreparedAnalysis) ->
         [
             {
                 "Chunk": item.chunk_index,
-                "Candidate SHA": short_hash(item.sha256),
+                "Indexed SHA": short_hash(item.sha256),
+                "Score": item.score,
                 "Text": item.text,
             }
             for item in result.results
@@ -576,6 +716,21 @@ def _render_retrieval(client: DashboardApiClient, analysis: PreparedAnalysis) ->
         hide_index=True,
         width="stretch",
     )
+
+
+def _current_search_result(
+    stored: object,
+    *,
+    expected_document_id: str,
+    current_sha256: str | None,
+) -> SearchResponse | None:
+    try:
+        result = SearchResponse.model_validate(stored)
+    except ValidationError:
+        return None
+    if result.document_id != expected_document_id or result.current_sha256 != current_sha256:
+        return None
+    return result
 
 
 def _detail_header(analysis: PreparedAnalysis, status: AnalysisStatusView) -> str:

@@ -2,7 +2,14 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from apps.dashboard.renderers import render_diff, render_identity, render_provenance_chain
+from apps.dashboard.api_client import SearchHit
+from apps.dashboard.rag_chat import RagExchange
+from apps.dashboard.renderers import (
+    render_diff,
+    render_identity,
+    render_provenance_chain,
+    render_rag_exchange,
+)
 from indexguard.contracts import (
     AnalysisStatusView,
     ChangeKind,
@@ -95,6 +102,36 @@ def test_diff_and_identity_escape_untrusted_backend_content() -> None:
     assert "&lt;img src=x onerror=alert(1)&gt;" in diff_html
     assert "candidate-&lt;script&gt;alert(1)&lt;/script&gt;.hwpx" in identity_html
     assert "Changed" in diff_html
+
+
+def test_rag_exchange_escapes_model_and_retrieval_content() -> None:
+    exchange = RagExchange(
+        question="<script>question</script>",
+        answer="<img src=x onerror=alert(1)> [S1]",
+        index_sha256="b" * 64,
+        citations=[
+            SearchHit(
+                document_id="policy<script>",
+                sha256=CANDIDATE_SHA,
+                chunk_index=3,
+                text="<iframe>retrieved</iframe>",
+                score=4.0,
+            )
+        ],
+        generated=True,
+    )
+
+    rendered = render_rag_exchange(exchange, sequence=1)
+
+    assert "<script>" not in rendered
+    assert "<img src=x" not in rendered
+    assert "<iframe>" not in rendered
+    assert "&lt;script&gt;question&lt;/script&gt;" in rendered
+    assert "&lt;img src=x onerror=alert(1)&gt;" in rendered
+    assert "&lt;iframe&gt;retrieved&lt;/iframe&gt;" in rendered
+    assert "Q 01" in rendered
+    assert "A 01" in rendered
+    assert "[S1]" in rendered
 
 
 def test_provenance_chain_never_closes_missing_authority_by_inference() -> None:

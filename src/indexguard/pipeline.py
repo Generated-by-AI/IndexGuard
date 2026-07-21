@@ -9,7 +9,14 @@ from typing import BinaryIO, Self
 from uuid import uuid4
 
 from indexguard.audit import AuditStore
-from indexguard.contracts import IndexOutcome, PolicyResult, PreparedAnalysis
+from indexguard.contracts import (
+    CurrentIndexView,
+    IndexOutcome,
+    IndexSearchHit,
+    IndexSearchResponse,
+    PolicyResult,
+    PreparedAnalysis,
+)
 from indexguard.detectors.document_diff import diff_documents
 from indexguard.errors import FormatMismatchError, IntegrityError
 from indexguard.extractors.base import DEFAULT_LIMITS, ExtractionLimits
@@ -141,6 +148,32 @@ class AnalysisPipeline:
         return [
             asdict(hit) for hit in self.indexer.search(query, limit=limit, document_id=document_id)
         ]
+
+    def search_snapshot(
+        self,
+        query: str,
+        *,
+        limit: int = 5,
+        document_id: str | None = None,
+    ) -> IndexSearchResponse:
+        current_sha256, hits = self.indexer.search_current_snapshot(
+            query,
+            limit=limit,
+            document_id=document_id,
+        )
+        return IndexSearchResponse(
+            query=query,
+            document_id=document_id,
+            current_sha256=current_sha256,
+            results=[IndexSearchHit.model_validate(asdict(hit)) for hit in hits],
+        )
+
+    def current_index(self, document_id: str) -> CurrentIndexView:
+        current = self.indexer.get_current_version(document_id)
+        return CurrentIndexView(
+            document_id=document_id,
+            sha256=None if current is None else current.sha256,
+        )
 
     def close(self) -> None:
         self.audit.close()
