@@ -102,7 +102,7 @@ def _opaque_cover_drawings(page) -> list[tuple[int, tuple[float, ...]]]:
 
 class PdfExtractor(BaseExtractor):
     format = DocumentFormat.PDF
-    parser_name = "pymupdf-security+opendataloader-layout"
+    parser_name = "opendataloader-pdf-layout+pymupdf-security"
 
     @classmethod
     def probe(cls, staged: StagedFile, limits: ExtractionLimits = DEFAULT_LIMITS) -> None:
@@ -293,7 +293,11 @@ class PdfExtractor(BaseExtractor):
                 staged=staged,
                 document_id=document_id,
                 document_format=self.format,
-                parser_name=self.parser_name,
+                parser_name=(
+                    self.parser_name
+                    if opendataloader_metadata["status"] == "used"
+                    else "pymupdf-security-fallback"
+                ),
                 parser_version=self.parser_version,
                 collector=collector,
                 metadata={

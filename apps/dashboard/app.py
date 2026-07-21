@@ -1,883 +1,417 @@
-"""IndexGuard Work C evidence workbench.
-
-Run from the repository root with:
-    uv run --extra dashboard streamlit run apps/dashboard/app.py
-"""
+"""Korean live dashboard for the directory-first IndexGuard review flow."""
 
 from __future__ import annotations
 
-import json
-import os
-from collections.abc import MutableMapping
+import threading
 from html import escape
 from pathlib import Path
-from typing import Protocol, cast
-from uuid import uuid4
 
 import streamlit as st
-from pydantic import ValidationError
 
-from apps.dashboard.api_client import (
-    DashboardApiClient,
-    DashboardApiError,
-    SearchResponse,
-    UploadDocument,
-)
-from apps.dashboard.presentation import (
-    action_help,
-    action_label,
-    filter_statuses,
-    queue_row,
-    short_hash,
-    state_label,
-    state_tone,
-)
-from apps.dashboard.rag_chat import (
-    answer_from_protected_index,
-    append_exchange,
-    exchanges_for_current_index,
-    load_exchanges,
-)
-from apps.dashboard.renderers import (
-    render_diff,
-    render_identity,
-    render_provenance_chain,
-    render_rag_exchange,
-)
-from apps.dashboard.state import (
-    authority_issues,
-    can_dispatch_analysis,
-    effective_commands,
-    replacement_authority_issues,
-)
-from indexguard.contracts import (
-    AnalysisStatusView,
-    Finding,
-    OperatorAction,
-    OperatorCommand,
-    PreparedAnalysis,
-    WorkflowState,
-)
-from indexguard.errors import IndexGuardError
-from indexguard.openai_compat import OpenAICompatibleClient, OpenAICompatibleSettings
+# ``streamlit run apps/dashboard/app.py`` executes this file as a script,
+# while tests import it as ``apps.dashboard.app``.  Keep both supported so
+# ordinary dashboard startup cannot fail with ``No module named 'apps'``.
+if __package__:
+    from apps.dashboard.api_client import DashboardApiClient, DashboardApiError, ReviewQueueItem
+else:
+    from api_client import DashboardApiClient, DashboardApiError, ReviewQueueItem
 
 _CSS_PATH = Path(__file__).parent / "assets" / "indexguard.css"
-_SUPPORTED_SUFFIXES = {".pdf", ".docx", ".hwpx"}
+_REQUESTED = "\uc694\uccad\ub428"
+_ADDED = "\ucd94\uac00"
+_DELETED = "\uc0ad\uc81c"
 
 
-class _AnalysisReader(Protocol):
-    def get_status(self, analysis_id: str) -> AnalysisStatusView: ...
+class _QueueSubscriber:
+    """One background long-poll connection shared by dashboard sessions."""
 
-    def get_analysis(self, analysis_id: str) -> PreparedAnalysis: ...
+    def __init__(self, base_url: str) -> None:
+        self._client = DashboardApiClient(base_url)
+        self._lock = threading.RLock()
+        self._items: list[ReviewQueueItem] = []
+        self._revision = -1
+        self._error: DashboardApiError | None = None
+        self._thread = threading.Thread(
+            target=self._listen,
+            daemon=True,
+            name="indexguard-dashboard-queue",
+        )
+        self._thread.start()
+
+    def snapshot(self) -> tuple[list[ReviewQueueItem], DashboardApiError | None]:
+        with self._lock:
+            return list(self._items), self._error
+
+    def _listen(self) -> None:
+        while True:
+            try:
+                update = self._client.wait_for_review_queue_update(
+                    after_revision=self._revision,
+                )
+            except DashboardApiError as exc:
+                with self._lock:
+                    self._error = exc
+                threading.Event().wait(2)
+                continue
+            with self._lock:
+                self._items = update.items
+                self._revision = update.revision
+                self._error = None
 
 
-class _SessionState(Protocol):
-    def __delitem__(self, key: str) -> None: ...
-
-    def __setitem__(self, key: str, value: object) -> None: ...
-
-
-class _EnvironmentRagAnswerer:
-    """Resolve model configuration only after protected evidence is found."""
-
-    def answer_rag_question(self, **kwargs) -> str:
-        client = OpenAICompatibleClient(OpenAICompatibleSettings.from_environment())
-        return client.answer_rag_question(**kwargs)
+@st.cache_resource(show_spinner=False)
+def _queue_subscriber(base_url: str) -> _QueueSubscriber:
+    return _QueueSubscriber(base_url)
 
 
 def main() -> None:
-    st.set_page_config(page_title="IndexGuard evidence workbench", layout="wide")
-    st.html(_CSS_PATH)
-
+    st.set_page_config(page_title="IndexGuard \uac80\ud1a0 \ub300\uc2dc\ubcf4\ub4dc", layout="wide")
+    if _CSS_PATH.exists():
+        st.markdown(
+            f"<style>{_CSS_PATH.read_text(encoding='utf-8')}</style>",
+            unsafe_allow_html=True,
+        )
     try:
         client = DashboardApiClient.from_environment()
     except ValueError as exc:
-        _render_header(None, "Invalid gateway configuration", healthy=False)
-        st.error(str(exc))
+        st.error(f"\ub300\uc2dc\ubcf4\ub4dc \uc5f0\uacb0 \uc124\uc815 \uc624\ub958: {exc}")
         return
 
-    health_label: str | None = None
-    health_error: DashboardApiError | None = None
     try:
         health = client.health()
-        health_label = f"{health.service} · {health.status}"
     except DashboardApiError as exc:
-        health_error = exc
-
-    _render_header(
-        client.base_url,
-        health_label or "Gateway unavailable",
-        healthy=health_error is None,
-    )
-    _show_flash()
-
-    toolbar_left, toolbar_right = st.columns([0.72, 0.28], gap="medium")
-    with toolbar_left:
-        if health_error is None:
-            st.caption(
-                "Authoritative state comes from A. The console never calculates risk or "
-                "indexes directly."
-            )
-        else:
-            _show_api_error("The console cannot reach A", health_error)
-    with toolbar_right:
-        _render_prepare_popover(client)
-
-    try:
-        statuses = client.list_analyses(limit=200)
-    except DashboardApiError as exc:
-        _show_api_error("The review queue is unavailable", exc)
-        st.info("Keep all candidates out of the index until the gateway state can be verified.")
+        st.error(
+            f"\uac8c\uc774\ud2b8\uc6e8\uc774\uc5d0 \uc5f0\uacb0\ud560 \uc218 \uc5c6\uc2b5\ub2c8\ub2e4: "
+            f"{exc.message} [{exc.code}]"
+        )
         return
-
-    requested_analysis = st.query_params.get("analysis")
-    if isinstance(requested_analysis, str) and any(
-        status.analysis_id == requested_analysis for status in statuses
-    ):
-        st.session_state["selected_analysis_id"] = requested_analysis
-
-    queue_column, detail_column = st.columns([0.42, 0.58], gap="medium")
-    with queue_column:
-        selected_id = _render_queue(statuses)
-    with detail_column:
-        if selected_id is None:
-            _render_no_selection(statuses)
-        else:
-            _render_detail(client, selected_id)
+    _render_masthead(client.base_url, health.service, health.status)
+    _live_workspace(client)
 
 
-def _render_header(base_url: str | None, gateway_label: str, *, healthy: bool) -> None:
-    endpoint = base_url or "not configured"
-    tone = "allow" if healthy else "neutral"
+def _render_masthead(base_url: str, service: str, status: str) -> None:
     st.html(
         '<header class="ig-masthead">'
         '<h1 class="ig-brand">IndexGuard</h1>'
-        '<div class="ig-route">Document review / Evidence workbench</div>'
+        '<div class="ig-route">\uac10\uc2dc \ub514\ub809\ud130\ub9ac \ubcc0\uacbd \uac80\ud1a0 \ubc0f RAG \uc0c9\uc778 \uad00\ub9ac</div>'
         '<div class="ig-gateway">'
-        f'<span class="ig-gateway-dot ig-tone-{tone}" aria-hidden="true"></span>'
-        f"<span>{escape(gateway_label)} · {escape(endpoint)}</span>"
+        '<span class="ig-gateway-dot ig-tone-allow" aria-hidden="true"></span>'
+        f'<span>{escape(service)} · {escape(status)} · {escape(base_url)}</span>'
         "</div></header>"
     )
 
 
-def _render_prepare_popover(client: DashboardApiClient) -> None:
-    with st.popover("Prepare document comparison", width="stretch"):
-        st.markdown("#### Prepare trusted baseline and candidate")
-        st.caption(
-            "This creates deterministic evidence only. It does not approve or index the candidate."
+@st.fragment(run_every="5s")
+def _live_workspace(client: DashboardApiClient) -> None:
+    """Render state received through the gateway's long-poll connection.
+
+    The fragment repaints only this workspace.  The subscriber holds one
+    blocking request and replaces its cache only after a queue revision is
+    reported, so the browser is never reloaded on a two-second polling loop.
+    """
+
+    items, error = _queue_subscriber(client.base_url).snapshot()
+    if error is not None:
+        st.error(
+            f"\uac80\ud1a0 \ub300\uae30\uc5f4\uc744 \ubd88\ub7ec\uc62c \uc218 \uc5c6\uc2b5\ub2c8\ub2e4: "
+            f"{error.message} [{error.code}]"
         )
-        document_id = st.text_input(
-            "Document ID",
-            key="prepare_document_id",
-            placeholder="policy-expense-2026",
-        )
-        changed_by = st.text_input(
-            "Changed by",
-            key="prepare_changed_by",
-            placeholder="security-reviewer",
-        )
-        baseline = st.file_uploader(
-            "Trusted baseline",
-            type=["pdf", "docx", "hwpx"],
-            key="prepare_baseline",
-        )
-        candidate = st.file_uploader(
-            "Candidate version",
-            type=["pdf", "docx", "hwpx"],
-            key="prepare_candidate",
-        )
-        if st.button("Prepare evidence", type="primary", width="stretch"):
-            if not document_id.strip() or not changed_by.strip():
-                st.error("Enter both a document ID and the person or system that changed it.")
-                return
-            if baseline is None or candidate is None:
-                st.error("Choose both the trusted baseline and candidate files.")
-                return
-            if not _supported_file(baseline.name) or not _supported_file(candidate.name):
-                st.error("Use PDF, DOCX, or HWPX. Legacy binary HWP is not supported.")
-                return
-            try:
-                with st.spinner("Extracting and comparing both versions…"):
-                    prepared = client.prepare(
-                        document_id=document_id.strip(),
-                        changed_by=changed_by.strip(),
-                        baseline=UploadDocument(
-                            baseline.name,
-                            baseline.getvalue(),
-                            baseline.type,
-                        ),
-                        candidate=UploadDocument(
-                            candidate.name,
-                            candidate.getvalue(),
-                            candidate.type,
-                        ),
-                    )
-            except DashboardApiError as exc:
-                _show_api_error("The gateway could not prepare this comparison", exc)
-                return
-            st.session_state["selected_analysis_id"] = prepared.analysis_id
-            _set_flash(
-                "success",
-                "Evidence prepared. Risk is still unresolved and the candidate is not "
-                "approved for indexing.",
+        return
+
+    left, right = st.columns([0.42, 0.58], gap="large")
+    with left:
+        selected_id = _render_queue(items)
+    with right:
+        selected = next((item for item in items if item.id == selected_id), None)
+        if selected is None:
+            st.info(
+                "\uac80\ud1a0 \ub300\uae30\uc5f4\uc5d0\uc11c \ubcc0\uacbd \ud56d\ubaa9\uc744 "
+                "\uc120\ud0dd\ud558\uc138\uc694. \uc11c\ubc84\uc5d0\uc11c \uc0c8 \ubcc0\uacbd\uc744 "
+                "\uac10\uc9c0\ud558\uba74 \ubaa9\ub85d\uc774 \uc790\ub3d9\uc73c\ub85c \uac31\uc2e0\ub429\ub2c8\ub2e4."
             )
-            st.rerun()
+        else:
+            _render_detail(client, selected)
 
 
-def _render_queue(statuses: list[AnalysisStatusView]) -> str | None:
+def _render_queue(items: list[ReviewQueueItem]) -> str | None:
     st.html(
-        '<div class="ig-panel-heading"><h2>Review queue</h2>'
-        f"<span>{len(statuses)} analyses</span></div>"
+        '<div class="ig-panel-heading">'
+        '<h2>\uac80\ud1a0 \ub300\uae30\uc5f4</h2>'
+        f'<span>{_REQUESTED} {len(items)}\uac74 · \uc790\ub3d9 \uac10\uc9c0 \uc911</span>'
+        "</div>"
     )
+    if not items:
+        st.html(
+            '<section class="ig-empty">'
+            '<strong>\uac80\ud1a0\uac00 \ud544\uc694\ud55c \ubcc0\uacbd\uc774 \uc5c6\uc2b5\ub2c8\ub2e4.</strong>'
+            '<span>\uc77c\ubc18 \ubcc0\uacbd\uc740 \uc548\uc804\uc131 \ud310\ub2e8 \ud6c4 \uc790\ub3d9\uc73c\ub85c \uc0c9\uc778\ub429\ub2c8\ub2e4.</span>'
+            "</section>"
+        )
+        st.session_state.pop("selected_queue_item", None)
+        return None
     query = st.text_input(
-        "Find analysis",
-        placeholder="Document, analysis ID, actor, or SHA",
+        "\ubcc0\uacbd \uac80\uc0c9",
+        placeholder="\ud30c\uc77c \uacbd\ub85c \ub610\ub294 \ubcc0\uacbd \uc720\ud615",
         label_visibility="collapsed",
     )
-    selected_states = st.multiselect(
-        "Workflow state",
-        options=list(WorkflowState),
-        format_func=state_label,
-        placeholder="All workflow states",
-    )
-    filtered = filter_statuses(statuses, query=query, states=set(selected_states))
+    filtered = [
+        item
+        for item in items
+        if query.casefold() in f"{item.path} {item.change_type}".casefold()
+    ]
     if not filtered:
-        if statuses:
-            st.info("No analyses match the current search and workflow filters.")
-        else:
-            st.info("No prepared analyses yet. Prepare a baseline and candidate to begin review.")
+        st.info("\uac80\uc0c9 \uc870\uac74\uacfc \uc77c\uce58\ud558\ub294 \ubcc0\uacbd\uc774 \uc5c6\uc2b5\ub2c8\ub2e4.")
         return None
+    selected_id = st.session_state.get("selected_queue_item")
+    if selected_id not in {item.id for item in items}:
+        st.session_state.pop("selected_queue_item", None)
+        selected_id = None
 
-    rows = [queue_row(status) for status in filtered]
+    rows = [
+        {
+            "\ud30c\uc77c": item.path,
+            "\ubcc0\uacbd": item.change_type,
+            "\uc0c1\ud0dc": _REQUESTED,
+            "\uc694\uc57d \uc0c1\ud0dc": (
+                "LLM \ubcc0\uacbd \ubd84\uc11d \uc911"
+                if item.summary_status == "PENDING"
+                else "5\ucd08 \ub4a4 \uc790\ub3d9 \uc0c9\uc778"
+                if item.auto_processing
+                else "\uc6b4\uc601\uc790 \uac80\ud1a0"
+            ),
+        }
+        for item in filtered
+    ]
+    # ``single-cell`` removes the checkbox-only row picker.  Any cell in a
+    # row becomes a direct entry point to that change's detail view.
     event = st.dataframe(
-        [row.as_record() for row in rows],
-        column_order=("Document", "Workflow", "Policy", "Gateway outcome"),
-        column_config={
-            "Document": st.column_config.TextColumn("Document · audit", width=150),
-            "Workflow": st.column_config.TextColumn("Workflow", width=80),
-            "Policy": st.column_config.TextColumn("Policy", width=70),
-            "Gateway outcome": st.column_config.TextColumn("Gateway", width=110),
-        },
+        rows,
         hide_index=True,
-        height=520,
         width="stretch",
-        selection_mode="single-row",
+        height=min(460, 74 + 36 * len(rows)),
+        selection_mode="single-cell",
         on_select="rerun",
-        key="analysis_queue",
+        key="directory_review_queue",
     )
-    selected_rows = event.get("selection", {}).get("rows", [])
-    if selected_rows:
-        selected_id = rows[selected_rows[0]].analysis_id
-        st.session_state["selected_analysis_id"] = selected_id
-    else:
-        selected_id = st.session_state.get("selected_analysis_id")
-    valid_ids = {item.analysis_id for item in filtered}
-    if selected_id not in valid_ids:
-        st.session_state.pop("selected_analysis_id", None)
-        st.caption("Select a queue row to open its authoritative evidence.")
-        return None
-
-    selected_row = next(row for row in rows if row.analysis_id == selected_id)
-    st.caption(
-        f"Selected {selected_row.revision} · {selected_row.gateway_outcome} · "
-        f"candidate {selected_row.candidate_sha} · audit {selected_row.audit_chain.lower()}"
-    )
+    cells = event.get("selection", {}).get("cells", [])
+    if cells:
+        row_index, _column = cells[0]
+        st.session_state["selected_queue_item"] = filtered[row_index].id
+        selected_id = filtered[row_index].id
     return selected_id
 
 
-def _render_no_selection(statuses: list[AnalysisStatusView]) -> None:
-    if statuses:
-        st.info("Select an analysis from the review queue to inspect its evidence.")
-    else:
-        st.html(
-            '<section class="ig-empty"><strong>No evidence to review</strong>'
-            "<span>Prepare a trusted baseline and candidate from the control "
-            "above.</span></section>"
-        )
-
-
-def _render_detail(client: DashboardApiClient, analysis_id: str) -> None:
-    try:
-        status = client.get_status(analysis_id)
-        analysis = client.get_analysis(analysis_id)
-    except DashboardApiError as exc:
-        _show_api_error("The selected analysis cannot be inspected", exc)
-        if exc.code == "OPERATOR_TOKEN_MISSING":
-            st.info(
-                "Configure INDEXGUARD_OPERATOR_TOKEN in the dashboard process to read "
-                "prepared evidence."
-            )
-        return
-
-    st.html(_detail_header(analysis, status))
-    st.html(render_provenance_chain(analysis, status))
-
-    issues = authority_issues(status, analysis)
-    for issue in issues:
-        st.error(f"{issue.message} [{issue.code}]")
-
-    changes_tab, findings_tab, identity_tab, actions_tab, retrieval_tab = st.tabs(
-        ["Changes", "Risk evidence", "Identity", "Operator actions", "Protected RAG"]
-    )
-    with changes_tab:
-        _render_changes(analysis)
-    with findings_tab:
-        _render_risk_evidence(client, status, analysis)
-    with identity_tab:
-        _render_identity_and_audit(analysis, status)
-    with actions_tab:
-        _render_actions(client, status, analysis)
-    with retrieval_tab:
-        if issues:
-            st.error(
-                "Protected RAG is disabled until A's analysis identities and audit chain validate."
-            )
-        else:
-            _render_retrieval(client, analysis)
-
-
-def _render_changes(analysis: PreparedAnalysis) -> None:
-    st.caption(
-        f"Normalized changes: {len(analysis.diff.changes)} · "
-        f"numeric changes: {len(analysis.diff.numeric_changes)} · "
-        f"candidate artifacts: {len(analysis.candidate.artifacts)}"
-    )
-    st.html(render_diff(analysis))
-    if analysis.diff.numeric_changes:
-        st.markdown("#### Numeric evidence")
-        st.dataframe(
-            [
-                {
-                    "Change": item.change_index + 1,
-                    "Trusted baseline": " · ".join(item.before) or "—",
-                    "Candidate": " · ".join(item.after) or "—",
-                }
-                for item in analysis.diff.numeric_changes
-            ],
-            hide_index=True,
-            width="stretch",
-        )
-    with st.expander("Normalized source text"):
-        baseline, candidate = st.columns(2, gap="medium")
-        with baseline:
-            st.markdown("**Trusted baseline**")
-            st.text(analysis.baseline.text or "No normalized baseline text")
-        with candidate:
-            st.markdown("**Candidate**")
-            st.text(analysis.candidate.text or "No normalized candidate text")
-
-
-def _render_risk_evidence(
-    client: DashboardApiClient,
-    status: AnalysisStatusView,
-    analysis: PreparedAnalysis,
-) -> None:
-    policy = status.latest_policy
-    if policy is None:
-        st.warning(
-            "Risk decision not available. This candidate has not been approved for indexing."
-        )
-        if status.state is WorkflowState.ANALYSIS_REQUESTED:
-            st.info(
-                "The risk request is pending in A. Send it to the configured B analyzer "
-                "or let B pull it through its adapter."
-            )
-        elif status.state is WorkflowState.ANALYSIS_FAILED:
-            st.error("The latest B dispatch failed and no accepted policy is available.")
-
-        if can_dispatch_analysis(status, analysis):
-            if not client.has_operator_token:
-                st.info("Configure the operator token before sending a request to B.")
-            else:
-                dispatch_label = {
-                    WorkflowState.PREPARED: "Send risk request to B",
-                    WorkflowState.ANALYSIS_REQUESTED: "Send pending request to B",
-                    WorkflowState.ANALYSIS_FAILED: "Retry B analysis",
-                }[status.state]
-                if st.button(
-                    dispatch_label,
-                    type="primary",
-                    key=f"dispatch-{analysis.analysis_id}",
-                ):
-                    try:
-                        with st.spinner("Requesting B analysis through A…"):
-                            result = client.dispatch_analysis(analysis.analysis_id)
-                    except DashboardApiError as exc:
-                        _show_api_error("A could not complete the risk-analysis request", exc)
-                    else:
-                        _set_flash(
-                            "success",
-                            "Risk analysis completed with authoritative state "
-                            f"{state_label(result.state)}.",
-                        )
-                        st.rerun()
-    else:
-        tone = _policy_tone(policy.decision.value)
-        st.html(
-            '<div class="ig-panel-heading"><h2>Accepted B result</h2>'
-            f'<span class="ig-status ig-tone-{tone}">{escape(policy.decision.value)} + '
-            f"{escape(policy.index_action.value)}</span></div>"
-        )
-        st.caption(
-            f"Risk score {policy.risk_score}/100 · bound candidate "
-            f"{short_hash(policy.candidate_sha256 or 'not recorded')}"
-        )
-        if policy.findings:
-            st.html(_findings_html(policy.findings))
-        else:
-            st.info("B returned no findings with this accepted policy result.")
-
-    if analysis.candidate.artifacts:
-        st.markdown("#### Extraction artifacts")
-        st.dataframe(
-            [
-                {
-                    "Type": item.type,
-                    "Reason": item.reason,
-                    "Path": item.path or "—",
-                    "Location": _json_compact(
-                        item.location.model_dump(mode="json") if item.location else None
-                    ),
-                }
-                for item in analysis.candidate.artifacts
-            ],
-            hide_index=True,
-            width="stretch",
-        )
-
-
-def _render_identity_and_audit(
-    analysis: PreparedAnalysis,
-    status: AnalysisStatusView,
-) -> None:
-    st.html(render_identity(analysis))
-    if status.audit_chain_valid:
-        st.success("A verified the append-only audit chain for this analysis.")
-    else:
-        st.error("A could not verify the audit chain. Treat this analysis as unresolved.")
-    st.caption(
-        "A currently exposes chain validity but not the individual audit-event timeline. "
-        "The console does not invent event history."
-    )
-    with st.expander("Prepared-analysis contract payload"):
-        st.code(analysis.model_dump_json(indent=2), language="json")
-
-
-def _render_actions(
-    client: DashboardApiClient,
-    status: AnalysisStatusView,
-    analysis: PreparedAnalysis,
-) -> None:
-    issues = authority_issues(status, analysis)
-    if issues:
-        st.error("Operator commands are disabled until all authority inconsistencies are resolved.")
-        return
-    if not client.has_operator_token:
-        st.warning("Operator commands require INDEXGUARD_OPERATOR_TOKEN.")
-        return
-
-    allowed = effective_commands(status, analysis)
-    if not allowed:
-        st.info(
-            "A reports no operator command for the current state. The candidate remains "
-            "governed by "
-            "the displayed gateway outcome."
-        )
-        return
-
-    action = st.selectbox(
-        "Server-authorized command",
-        options=allowed,
-        format_func=action_label,
-        key=f"command_action_{analysis.analysis_id}",
-    )
-    st.caption(action_help(action))
-    actor_default = os.getenv("INDEXGUARD_OPERATOR_ACTOR", "")
-    with st.form(f"operator_command_{analysis.analysis_id}_{action.value}"):
-        actor = st.text_input(
-            "Audit actor label",
-            value=actor_default,
-            help="This label is recorded by A; the shared token is not proof of personal identity.",
-        )
-        reason = st.text_area(
-            "Rationale",
-            placeholder=_reason_placeholder(action),
-            max_chars=1000,
-        )
-        confirmed = st.checkbox(_confirmation_copy(action))
-        submitted = st.form_submit_button(action_label(action), type="primary", width="stretch")
-    if not submitted:
-        return
-    if not actor.strip():
-        st.error("Enter the actor label that A should record with this command.")
-        return
-    if not reason.strip():
-        st.error("Explain why this command is appropriate for the displayed evidence.")
-        return
-    if not confirmed:
-        st.error("Confirm the stated consequence before sending this command to A.")
-        return
-
-    idempotency_slot = (
-        f"command_idempotency_{analysis.analysis_id}_{analysis.candidate.sha256}_{action.value}"
-    )
-    idempotency_key = st.session_state.setdefault(
-        idempotency_slot,
-        f"dashboard-{action.value.lower()}-{uuid4().hex}",
-    )
-    command = OperatorCommand(
-        action=action,
-        actor=actor.strip(),
-        reason=reason.strip(),
-        idempotency_key=idempotency_key,
-        expected_candidate_sha256=analysis.candidate.sha256,
-    )
-    try:
-        with st.spinner(f"Sending {action.value} to A…"):
-            result = client.execute_command(
-                analysis.analysis_id,
-                command,
-                expected_document_id=analysis.document_id,
-            )
-    except DashboardApiError as exc:
-        if _command_failure_is_definitive(exc):
-            st.session_state.pop(idempotency_slot, None)
-        _show_api_error("A rejected the operator command", exc)
-        return
-
-    try:
-        _finalize_command_navigation(
-            client,
-            analysis,
-            result.replacement_analysis_id,
-            st.session_state,
-            idempotency_slot,
-        )
-    except DashboardApiError as exc:
-        _show_api_error(
-            "A accepted reanalysis, but its replacement cannot be verified",
-            exc,
-        )
-        return
-    replay = " Idempotent replay confirmed." if result.idempotent_replay else ""
-    _set_flash(
-        "success",
-        f"A accepted {action.value}. Authoritative state: "
-        f"{state_label(result.status.state)}.{replay}",
-    )
-    st.rerun()
-
-
-def _render_retrieval(client: DashboardApiClient, analysis: PreparedAnalysis) -> None:
-    state_key = f"rag_chat_{analysis.document_id}"
-    session_state = cast(MutableMapping[str, object], st.session_state)
-    try:
-        current_index = client.get_current_index(analysis.document_id)
-    except DashboardApiError as exc:
-        _show_api_error("Protected RAG identity is unavailable", exc)
-        return
-    stored_exchanges = load_exchanges(session_state, state_key)
-    exchanges, hidden_count = exchanges_for_current_index(
-        stored_exchanges,
-        current_index.sha256,
-    )
-    if hidden_count:
-        session_state[state_key] = [item.model_dump(mode="json") for item in exchanges]
-        st.info(
-            f"{hidden_count} earlier conversation entr"
-            f"{'y was' if hidden_count == 1 else 'ies were'} removed from this session "
-            "because the approved index changed."
-        )
-    heading, controls = st.columns([0.78, 0.22], gap="small")
-    with heading:
-        st.markdown("### Ask indexed evidence")
-        st.caption(
-            "Current approved index only · selected document · source SHAs identify the "
-            "exact indexed version. Generated explanations are not policy decisions."
-        )
-    with controls:
-        if exchanges and st.button(
-            "Clear conversation",
-            key=f"clear_{state_key}",
-            width="stretch",
-        ):
-            st.session_state.pop(state_key, None)
-            st.rerun()
-
-    if exchanges:
-        for sequence, exchange in enumerate(exchanges, start=1):
-            st.html(render_rag_exchange(exchange, sequence=sequence))
-    else:
-        st.html(
-            '<section class="ig-rag-empty"><strong>No evidence questions yet</strong>'
-            "<span>Ask about the current approved index for this document. Every answer "
-            "will retain its retrieved source rows for manual verification.</span></section>"
-        )
-
-    st.caption(
-        "Submitting sends your question, same-version conversation context, and retrieved "
-        "chunks to the configured model endpoint. Source labels are not semantic verification."
-    )
-    with st.form(f"rag_chat_form_{analysis.document_id}", clear_on_submit=True):
-        question = st.text_area(
-            "Question for approved evidence",
-            placeholder="승인 한도와 필요한 사전 승인 절차는 무엇인가요?",
-            max_chars=2_000,
-            height=88,
-        )
-        submitted = st.form_submit_button("Ask indexed evidence", type="primary")
-    if submitted:
-        if not question.strip():
-            st.error("Enter a question for the approved index.")
-        else:
-            try:
-                with st.spinner(
-                    "Retrieving approved chunks and preparing a source-labelled answer…"
-                ):
-                    exchange = answer_from_protected_index(
-                        client,
-                        _EnvironmentRagAnswerer(),
-                        question=question,
-                        document_id=analysis.document_id,
-                        previous_exchanges=exchanges,
-                    )
-            except DashboardApiError as exc:
-                _show_api_error("Protected RAG is unavailable", exc)
-            except IndexGuardError as exc:
-                retry = " Retry after the model service recovers." if exc.retryable else ""
-                st.error(f"Answer generation is unavailable: {exc.message} [{exc.code}].{retry}")
-            else:
-                append_exchange(session_state, state_key, exchange)
-                st.rerun()
-
-    with st.expander("Inspect raw protected retrieval"):
-        _render_raw_retrieval(client, analysis, current_index.sha256)
-
-
-def _render_raw_retrieval(
-    client: DashboardApiClient,
-    analysis: PreparedAnalysis,
-    current_sha256: str | None,
-) -> None:
-    st.caption(
-        "Searches only A's protected index. An empty result is not evidence that a "
-        "candidate is safe."
-    )
-    with st.form(f"protected_search_{analysis.analysis_id}"):
-        query = st.text_input(
-            "Search protected chunks",
-            placeholder="승인 한도, 외부 전송, 개인정보…",
-        )
-        limit = st.slider("Maximum results", min_value=1, max_value=20, value=5)
-        submitted = st.form_submit_button("Search protected index")
-    state_key = f"protected_search_result_{analysis.analysis_id}"
-    if submitted:
-        if not query.strip():
-            st.error("Enter a search phrase.")
-        else:
-            try:
-                result = client.search(
-                    query.strip(),
-                    limit=limit,
-                    document_id=analysis.document_id,
-                )
-            except DashboardApiError as exc:
-                _show_api_error("Protected retrieval is unavailable", exc)
-            else:
-                st.session_state[state_key] = result.model_dump(mode="json")
-    stored = st.session_state.get(state_key)
-    if stored is None:
-        return
-    result = _current_search_result(
-        stored,
-        expected_document_id=analysis.document_id,
-        current_sha256=current_sha256,
-    )
-    if result is None:
-        st.session_state.pop(state_key, None)
-        st.info(
-            "Stored retrieval was removed because it is not bound to the current approved "
-            "index. Run the search again."
-        )
-        return
-    if not result.results:
-        st.info("No indexed chunks matched this query for the selected document.")
-        return
-    st.dataframe(
-        [
-            {
-                "Chunk": item.chunk_index,
-                "Indexed SHA": short_hash(item.sha256),
-                "Score": item.score,
-                "Text": item.text,
-            }
-            for item in result.results
-        ],
-        hide_index=True,
-        width="stretch",
-    )
-
-
-def _current_search_result(
-    stored: object,
-    *,
-    expected_document_id: str,
-    current_sha256: str | None,
-) -> SearchResponse | None:
-    try:
-        result = SearchResponse.model_validate(stored)
-    except ValidationError:
-        return None
-    if result.document_id != expected_document_id or result.current_sha256 != current_sha256:
-        return None
-    return result
-
-
-def _detail_header(analysis: PreparedAnalysis, status: AnalysisStatusView) -> str:
-    tone = state_tone(status.state)
-    return (
+def _render_detail(client: DashboardApiClient, item: ReviewQueueItem) -> None:
+    st.html(
         '<header class="ig-detail-head">'
-        f"<h2>{escape(analysis.candidate.filename)}</h2>"
-        f'<span class="ig-status ig-tone-{tone}">{escape(state_label(status.state))}</span>'
+        f"<h2>{escape(item.path)}</h2>"
+        f'<span class="ig-status ig-tone-review">{escape(_REQUESTED)}</span>'
         '<div class="ig-detail-meta">'
-        f"{escape(analysis.document_id)} · {escape(analysis.analysis_id)} · "
-        f"v{analysis.version} / attempt {analysis.analysis_attempt} · candidate "
-        f"{escape(short_hash(analysis.candidate.sha256))}"
+        f"{escape(item.change_type)} · \ub9c8\uc9c0\ub9c9 \uac10\uc9c0 {escape(item.updated_at)}"
         "</div></header>"
     )
-
-
-def _findings_html(findings: list[Finding]) -> str:
-    items = []
-    for finding in findings:
-        severity = finding.severity or "Severity not supplied"
-        source = finding.source or "Source not supplied"
-        location = _json_compact(finding.location)
-        before_after = ""
-        if finding.before is not None or finding.after is not None:
-            before_after = (
-                f"<p><strong>Before:</strong> {escape(finding.before or '—')}<br>"
-                f"<strong>After:</strong> {escape(finding.after or '—')}</p>"
-            )
-        items.append(
-            '<article class="ig-finding">'
-            '<div class="ig-finding-head">'
-            f"<strong>{escape(finding.type)}</strong>"
-            f'<span class="ig-finding-meta">{escape(severity)} · {escape(source)}</span>'
-            "</div>"
-            f"<p>{escape(finding.reason)}</p>"
-            f"{before_after}"
-            f'<div class="ig-finding-location">Location: {escape(location)}</div>'
-            "</article>"
-        )
-    return f'<section class="ig-findings" aria-label="Risk findings">{"".join(items)}</section>'
-
-
-def _show_api_error(prefix: str, error: DashboardApiError) -> None:
-    retry = " You can retry after the underlying service recovers." if error.retryable else ""
-    st.error(f"{prefix}: {error.message} [{error.code}].{retry}")
-
-
-def _fetch_verified_replacement(
-    client: _AnalysisReader,
-    original: PreparedAnalysis,
-    replacement_analysis_id: str,
-) -> PreparedAnalysis:
-    replacement_status = client.get_status(replacement_analysis_id)
-    replacement = client.get_analysis(replacement_analysis_id)
-    issues = replacement_authority_issues(
-        original,
-        replacement_status,
-        replacement,
-        expected_analysis_id=replacement_analysis_id,
-    )
-    if issues:
-        raise DashboardApiError(
-            code="INVALID_GATEWAY_RESPONSE",
-            message=(
-                "The replacement analysis is not bound to the submitted reanalysis evidence "
-                "lineage. The original selection was preserved."
-            ),
-            retryable=False,
-        )
-    return replacement
-
-
-def _finalize_command_navigation(
-    client: _AnalysisReader,
-    original: PreparedAnalysis,
-    replacement_analysis_id: str | None,
-    session_state: _SessionState,
-    idempotency_slot: str,
-) -> PreparedAnalysis | None:
-    replacement = None
-    if replacement_analysis_id is not None:
-        replacement = _fetch_verified_replacement(
-            client,
-            original,
-            replacement_analysis_id,
-        )
-
-    del session_state[idempotency_slot]
-    if replacement is not None:
-        session_state["selected_analysis_id"] = replacement.analysis_id
-    return replacement
-
-
-def _command_failure_is_definitive(error: DashboardApiError) -> bool:
-    return not error.retryable and error.code != "INVALID_GATEWAY_RESPONSE"
-
-
-def _set_flash(level: str, message: str) -> None:
-    st.session_state["dashboard_flash"] = {"level": level, "message": message}
-
-
-def _show_flash() -> None:
-    flash = st.session_state.pop("dashboard_flash", None)
-    if not isinstance(flash, dict):
+    if item.auto_processing:
+        _render_auto_processing(client, item)
         return
-    message = str(flash.get("message", ""))
-    if flash.get("level") == "success":
-        st.success(message)
+    changes, document_info, agent_review, actions = st.tabs(
+        ["\ubcc0\uacbd \ub0b4\uc6a9", "\ubb38\uc11c \uc815\ubcf4", "\uc5d0\uc774\uc804\ud2b8 \ubd84\uc11d", "\uc6b4\uc601\uc790 \uc791\uc5c5"]
+    )
+    with changes:
+        if item.summary_status == "PENDING":
+            with st.spinner(
+                "LLM\uc774 \ubcc0\uacbd \ub0b4\uc6a9\uc744 \uad6c\uccb4\uc801\uc73c\ub85c "
+                "\uc694\uc57d\ud558\ub294 \uc911\uc785\ub2c8\ub2e4..."
+            ):
+                st.caption(
+                    "\uc694\uc57d\uc774 \uc644\ub8cc\ub418\uba74 \uc774 \uc601\uc5ed\uc5d0 "
+                    "\ubcc0\uacbd\ub41c \ub0b4\uc6a9\uacfc \uac80\ud1a0 \uc9c0\uc810\uc774 "
+                    "\ud45c\uc2dc\ub429\ub2c8\ub2e4."
+                )
+        else:
+            st.markdown("#### \ubcc0\uacbd \uc694\uc57d")
+            st.write(
+                item.summary
+                or "\uc694\uc57d\uc744 \ub9cc\ub4e4\uc9c0 \ubabb\ud588\uc2b5\ub2c8\ub2e4. "
+                "\uc544\ub798 \uc6d0\ubb38 \ube44\uad50\ub85c \uac80\ud1a0\ud558\uc138\uc694."
+            )
+            if item.summary_error:
+                st.caption(
+                    "\ubaa8\ub378 \uc5f0\uacb0\uc774 \uc9c0\uc5f0\ub418\uc5b4 "
+                    "\uc548\uc804\ud55c \uae30\ubcf8 \uc694\uc57d\uc73c\ub85c "
+                    "\ud45c\uc2dc\ud588\uc2b5\ub2c8\ub2e4."
+                )
+            if item.review_required is not None:
+                decision = "\ud544\uc694" if item.review_required else "\ubd88\ud544\uc694"
+                st.caption(f"LLM \ud310\ubcc4: \uc6b4\uc601\uc790 \uc791\uc5c5 {decision}")
+        _render_text_comparison(item)
+    with document_info:
+        _render_document_info(item)
+    with agent_review:
+        _render_agent_review(item)
+    with actions:
+        st.markdown(
+            "\uad00\ub9ac\uc790\ub294 \uc5d0\uc774\uc804\ud2b8 \ud310\ub2e8\uacfc "
+            "\uad00\uacc4\uc5c6\uc774 \uc9c1\uc811 \ucc98\ub9ac\ud560 \uc218 \uc788\uc2b5\ub2c8\ub2e4."
+        )
+        st.caption(
+            "\uc0c9\uc778\ud558\uba74 RAG\uc5d0 \ubc18\uc601\ub418\uace0, \ubcf5\uad6c\ud558\uba74 "
+            "\uc791\uc5c5 \ub514\ub809\ud130\ub9ac\ub97c \uae30\uc900 \ubb38\uc11c \uc0c1\ud0dc\ub85c "
+            "\ub418\ub3cc\ub9bd\ub2c8\ub2e4. \ucc98\ub9ac \ud6c4 \ud56d\ubaa9\uc740 "
+            "\ub300\uae30\uc5f4\uc5d0\uc11c \uc0ac\ub77c\uc9d1\ub2c8\ub2e4."
+        )
+        allow, restore = st.columns(2)
+        with allow:
+            if st.button(
+                "\ubcc0\uacbd \ubb38\uc11c \ud5c8\uc6a9 \ubc0f \uc0c9\uc778",
+                type="primary",
+                width="stretch",
+                key=f"accept-{item.id}",
+            ):
+                _run_action(client, item, accept=True)
+        with restore:
+            if st.button(
+                "\ubcc0\uacbd \ubcf5\uad6c", width="stretch", key=f"reject-{item.id}"
+            ):
+                _run_action(client, item, accept=False)
+
+
+def _render_auto_processing(client: DashboardApiClient, item: ReviewQueueItem) -> None:
+    """Give an LLM-cleared item a visible, cancellable five-second hold."""
+
+    st.html(
+        '<section class="ig-auto-process">'
+        '<div>'
+        '<strong>LLM \ud310\ubcc4 \uc644\ub8cc</strong>'
+        '<span>\uc790\ub3d9\uc73c\ub85c \ucc98\ub9ac\ub429\ub2c8\ub2e4.</span>'
+        '<p>5\ucd08 \ud6c4 RAG \uc0c9\uc778\uc5d0 \ubc18\uc601\ub429\ub2c8\ub2e4. \uc544\ub798 \ubc84\ud2bc\uc744 \ub204\ub974\uba74 \uc6b4\uc601\uc790 \uac80\ud1a0\ub85c \uc804\ud658\ud569\ub2c8\ub2e4.</p>'
+        '</div>'
+        '</section>'
+    )
+    if st.button(
+        "LLM \ud310\ubcc4 \uc644\ub8cc \u00b7 \uc790\ub3d9 \ucc98\ub9ac \uc911\uc9c0",
+        type="primary",
+        width="stretch",
+        key=f"hold-{item.id}",
+    ):
+        try:
+            client.hold_review_queue_item(item.id)
+        except DashboardApiError as exc:
+            st.error(f"\uc790\ub3d9 \ucc98\ub9ac\ub97c \uc911\uc9c0\ud558\uc9c0 \ubabb\ud588\uc2b5\ub2c8\ub2e4: {exc.message} [{exc.code}]")
+            return
+        st.success("\uc790\ub3d9 \ucc98\ub9ac\ub97c \uc911\uc9c0\ud558\uace0 \uc6b4\uc601\uc790 \uac80\ud1a0\ub85c \uc804\ud658\ud588\uc2b5\ub2c8\ub2e4.")
+        st.rerun()
+
+
+def _render_text_comparison(item: ReviewQueueItem) -> None:
+    st.markdown("#### \uac12 \ubcc0\uacbd \ub0b4\uc5ed")
+    if item.changed_values:
+        labels = {"ADD": "\ucd94\uac00", "DELETE": "\uc0ad\uc81c", "REPLACE": "\uc218\uc815"}
+        st.dataframe(
+            [
+                {
+                    "\ubcc0\uacbd": labels.get(value.kind, value.kind),
+                    "\uae30\uc900 \uac12": value.before or "—",
+                    "\ubcc0\uacbd \uac12": value.after or "—",
+                }
+                for value in item.changed_values
+            ],
+            hide_index=True,
+            width="stretch",
+        )
     else:
-        st.info(message)
+        st.caption("\ubcc0\uacbd \ub41c \ud14d\uc2a4\ud2b8 \uac12\uc774 \uc5c6\uc2b5\ub2c8\ub2e4.")
+    with st.expander("\ucd94\ucd9c\ub41c \uc6d0\ubb38 \ube44\uad50"):
+        _render_source_texts(item)
 
 
-def _supported_file(filename: str) -> bool:
-    return Path(filename).suffix.casefold() in _SUPPORTED_SUFFIXES
+def _render_source_texts(item: ReviewQueueItem) -> None:
+    if item.change_type == _ADDED:
+        st.code(item.after_text or "\ucd94\ucd9c \uac00\ub2a5\ud55c \ud14d\uc2a4\ud2b8\uac00 \uc5c6\uc2b5\ub2c8\ub2e4.", language="text")
+        return
+    if item.change_type == _DELETED:
+        st.code(item.before_text or "\ucd94\ucd9c \uac00\ub2a5\ud55c \ud14d\uc2a4\ud2b8\uac00 \uc5c6\uc2b5\ub2c8\ub2e4.", language="text")
+        return
+    before, after = st.columns(2)
+    with before:
+        st.caption("\uae30\uc900 \ub0b4\uc6a9")
+        st.code(item.before_text or "\ucd94\ucd9c \uac00\ub2a5\ud55c \ud14d\uc2a4\ud2b8\uac00 \uc5c6\uc2b5\ub2c8\ub2e4.", language="text")
+    with after:
+        st.caption("\ubcc0\uacbd \ub0b4\uc6a9")
+        st.code(item.after_text or "\ucd94\ucd9c \uac00\ub2a5\ud55c \ud14d\uc2a4\ud2b8\uac00 \uc5c6\uc2b5\ub2c8\ub2e4.", language="text")
 
 
-def _policy_tone(decision: str) -> str:
-    return {"ALLOW": "allow", "REVIEW": "review", "BLOCK": "block"}.get(decision, "muted")
+def _render_document_info(item: ReviewQueueItem) -> None:
+    st.markdown("#### \ub85c\ub354 · \ud30c\uc11c \uacb0\uacfc")
+    records = []
+    for label, document in (
+        ("\uae30\uc900 \ubb38\uc11c", item.baseline_document),
+        ("\ubcc0\uacbd \ubb38\uc11c", item.candidate_document),
+    ):
+        if document is not None:
+            records.append(
+                {
+                    "\ub300\uc0c1": label,
+                    "\ud615\uc2dd": document.format,
+                    "\ud30c\uc11c": f"{document.parser_name} {document.parser_version}",
+                    "\ucd94\ucd9c": (
+                        "\uc131\uacf5"
+                        if document.extraction_status == "SUCCESS"
+                        else "\uc2e4\ud328"
+                    ),
+                    "\ud14d\uc2a4\ud2b8": f"{document.extracted_characters:,}\uc790",
+                    "\uac10\uc9c0": (
+                        ", ".join(document.artifacts)
+                        if document.artifacts
+                        else "\uc5c6\uc74c"
+                    ),
+                }
+            )
+    if records:
+        st.dataframe(records, hide_index=True, width="stretch")
+    else:
+        st.info(
+            "\ucd94\ucd9c \uba54\ud0c0\ub370\uc774\ud130\uac00 \uc544\uc9c1 "
+            "\uc900\ube44\ub418\uc9c0 \uc54a\uc558\uc2b5\ub2c8\ub2e4."
+        )
 
 
-def _reason_placeholder(action: OperatorAction) -> str:
-    return {
-        OperatorAction.APPROVE: "State which ALLOW evidence and candidate SHA you verified.",
-        OperatorAction.HOLD: (
-            "State which evidence or unresolved condition requires continued hold."
-        ),
-        OperatorAction.REANALYZE: "State what changed or why a fresh B analysis is required.",
-    }[action]
+def _render_agent_review(item: ReviewQueueItem) -> None:
+    """Render the existing evidence-panel style for the read-only agent report."""
+
+    st.markdown("#### 색인 자료 대조 분석")
+    if item.agent_status == "PENDING":
+        with st.spinner("에이전트가 승인된 색인 자료와 변경 내용을 대조하는 중입니다..."):
+            st.caption("색인된 문서에서 근거를 찾은 뒤, 모순 가능성만 보고합니다.")
+        return
+    if item.agent_status == "NOT_REQUIRED":
+        st.caption("운영자 검토가 필요한 변경에 대해서만 에이전트 대조 분석을 실행합니다.")
+        return
+    if item.agent_status == "ERROR":
+        st.warning("에이전트 분석을 완료하지 못했습니다. 운영자가 원문과 색인 근거를 직접 확인하세요.")
+        return
+    st.markdown(item.agent_report or "검출된 모순이 없습니다.")
+    st.markdown("#### 대조에 사용한 승인 색인 근거")
+    if item.agent_evidence:
+        st.dataframe(item.agent_evidence, hide_index=True, width="stretch")
+    else:
+        st.caption("관련 승인 색인 근거를 찾지 못했습니다.")
 
 
-def _confirmation_copy(action: OperatorAction) -> str:
-    return {
-        OperatorAction.APPROVE: (
-            "I verified the displayed candidate SHA and latest ALLOW + INDEX result."
-        ),
-        OperatorAction.HOLD: "I confirm this candidate must remain out of the index.",
-        OperatorAction.REANALYZE: (
-            "I confirm a new attempt should supersede this analysis while the candidate "
-            "remains held."
-        ),
-    }[action]
-
-
-def _json_compact(value: object) -> str:
-    if value is None:
-        return "Not recorded"
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+def _run_action(client: DashboardApiClient, item: ReviewQueueItem, *, accept: bool) -> None:
+    label = "\uc0c9\uc778" if accept else "\ubcf5\uad6c"
+    try:
+        with st.spinner(f"\ubcc0\uacbd\uc744 {label}\ud558\ub294 \uc911\uc785\ub2c8\ub2e4..."):
+            result = (
+                client.accept_review_queue_item(item.id)
+                if accept
+                else client.reject_review_queue_item(item.id)
+            )
+    except DashboardApiError as exc:
+        st.error(f"{label} \uc791\uc5c5\uc744 \uc644\ub8cc\ud558\uc9c0 \ubabb\ud588\uc2b5\ub2c8\ub2e4: {exc.message} [{exc.code}]")
+        return
+    st.session_state.pop("selected_queue_item", None)
+    st.success(result.message)
+    st.rerun()
 
 
 if __name__ == "__main__":

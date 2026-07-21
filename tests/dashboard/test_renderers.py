@@ -2,14 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from apps.dashboard.api_client import SearchHit
-from apps.dashboard.rag_chat import RagExchange
-from apps.dashboard.renderers import (
-    render_diff,
-    render_identity,
-    render_provenance_chain,
-    render_rag_exchange,
-)
+from apps.dashboard.renderers import render_diff, render_identity, render_review_outcomes
 from indexguard.contracts import (
     AnalysisStatusView,
     ChangeKind,
@@ -101,44 +94,15 @@ def test_diff_and_identity_escape_untrusted_backend_content() -> None:
     assert "&lt;script&gt;baseline&lt;/script&gt;" in diff_html
     assert "&lt;img src=x onerror=alert(1)&gt;" in diff_html
     assert "candidate-&lt;script&gt;alert(1)&lt;/script&gt;.hwpx" in identity_html
-    assert "Changed" in diff_html
+    assert "변경" in diff_html
 
 
-def test_rag_exchange_escapes_model_and_retrieval_content() -> None:
-    exchange = RagExchange(
-        question="<script>question</script>",
-        answer="<img src=x onerror=alert(1)> [S1]",
-        index_sha256="b" * 64,
-        citations=[
-            SearchHit(
-                document_id="policy<script>",
-                sha256=CANDIDATE_SHA,
-                chunk_index=3,
-                text="<iframe>retrieved</iframe>",
-                score=4.0,
-            )
-        ],
-        generated=True,
-    )
-
-    rendered = render_rag_exchange(exchange, sequence=1)
-
-    assert "<script>" not in rendered
-    assert "<img src=x" not in rendered
-    assert "<iframe>" not in rendered
-    assert "&lt;script&gt;question&lt;/script&gt;" in rendered
-    assert "&lt;img src=x onerror=alert(1)&gt;" in rendered
-    assert "&lt;iframe&gt;retrieved&lt;/iframe&gt;" in rendered
-    assert "Q 01" in rendered
-    assert "A 01" in rendered
-    assert "[S1]" in rendered
-
-
-def test_provenance_chain_never_closes_missing_authority_by_inference() -> None:
-    analysis = _analysis()
-    missing = render_provenance_chain(analysis, _status())
-    assert "Policy unavailable" in missing
-    assert "Not indexed" in missing
+def test_review_outcomes_never_closes_missing_authority_by_inference() -> None:
+    missing = render_review_outcomes(_status())
+    assert "정책 결과 없음" in missing
+    assert "미색인" in missing
+    assert "기준 문서" not in missing
+    assert "변경 문서" not in missing
 
     policy = PolicyResult(
         decision=Decision.ALLOW,
@@ -147,7 +111,7 @@ def test_provenance_chain_never_closes_missing_authority_by_inference() -> None:
         index_action=IndexAction.INDEX,
         candidate_sha256=CANDIDATE_SHA,
     )
-    awaiting = render_provenance_chain(analysis, _status(policy))
+    awaiting = render_review_outcomes(_status(policy))
     assert "ALLOW + INDEX" in awaiting
-    assert "Not indexed" in awaiting
-    assert "Awaiting approval" in awaiting
+    assert "미색인" in awaiting
+    assert "승인 대기" in awaiting

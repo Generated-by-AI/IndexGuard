@@ -21,7 +21,7 @@ from indexguard.integrity import canonical_json, sha256_file
 
 STATE_SCHEMA_VERSION = 1
 DEFAULT_STATE_FILENAME = ".indexguard-scan-state.json"
-SUPPORTED_EXTENSIONS = frozenset({".docx", ".hwpx", ".pdf"})
+SUPPORTED_EXTENSIONS = frozenset({".docx", ".hwpx", ".md", ".markdown", ".pdf"})
 
 
 class ScanStateError(ValueError):
@@ -119,7 +119,7 @@ def _record_from_state(path: str, value: object) -> FileRecord:
     sha256 = value["sha256"]
     size = value["size"]
     mtime_ns = value["mtime_ns"]
-    if file_format not in {"PDF", "DOCX", "HWPX"}:
+    if file_format not in {"PDF", "DOCX", "HWPX", "MD", "MARKDOWN"}:
         raise ScanStateError(f"invalid format for {path!r}")
     if not isinstance(sha256, str) or not re_full_sha256(sha256):
         raise ScanStateError(f"invalid sha256 for {path!r}")

@@ -15,38 +15,37 @@ from indexguard.contracts import (
 _KST = ZoneInfo("Asia/Seoul")
 
 _STATE_LABELS = {
-    WorkflowState.PREPARED: "Prepared",
-    WorkflowState.ANALYSIS_REQUESTED: "Analysis requested",
-    WorkflowState.ANALYSIS_FAILED: "Analysis failed",
-    WorkflowState.AWAITING_APPROVAL: "Awaiting approval",
-    WorkflowState.HOLD: "Held",
-    WorkflowState.INDEXED: "Indexed",
-    WorkflowState.QUARANTINED: "Quarantined",
-    WorkflowState.SUPERSEDED: "Superseded",
+    WorkflowState.PREPARED: "분석 준비됨",
+    WorkflowState.ANALYSIS_REQUESTED: "분석 요청됨",
+    WorkflowState.ANALYSIS_FAILED: "분석 실패",
+    WorkflowState.AWAITING_APPROVAL: "승인 대기",
+    WorkflowState.HOLD: "보류",
+    WorkflowState.INDEXED: "색인됨",
+    WorkflowState.QUARANTINED: "격리됨",
+    WorkflowState.SUPERSEDED: "대체됨",
 }
 
 _QUEUE_STATE_LABELS = {
-    WorkflowState.ANALYSIS_REQUESTED: "Requested",
-    WorkflowState.ANALYSIS_FAILED: "Failed",
-    WorkflowState.AWAITING_APPROVAL: "Approval pending",
+    WorkflowState.ANALYSIS_REQUESTED: "요청됨",
+    WorkflowState.ANALYSIS_FAILED: "실패",
+    WorkflowState.AWAITING_APPROVAL: "승인 대기",
 }
 
 _ACTION_LABELS = {
-    OperatorAction.APPROVE: "Approve verified result for indexing",
-    OperatorAction.HOLD: "Continue holding candidate",
-    OperatorAction.REANALYZE: "Create new analysis attempt",
+    OperatorAction.APPROVE: "검토 결과 승인 및 색인",
+    OperatorAction.HOLD: "변경 문서 계속 보류",
+    OperatorAction.REANALYZE: "새 분석 시도 만들기",
 }
 
 _ACTION_HELP = {
     OperatorAction.APPROVE: (
-        "A will index only if the latest B result is still ALLOW + INDEX and the "
-        "candidate SHA matches."
+        "최신 B 결과가 ALLOW + INDEX이고 변경 문서가 검토한 버전과 일치할 때만 A가 색인합니다."
     ),
     OperatorAction.HOLD: (
-        "A will keep the candidate out of the index and preserve the current trusted version."
+        "A는 변경 문서를 색인하지 않고 현재 신뢰 버전을 유지합니다."
     ),
     OperatorAction.REANALYZE: (
-        "A will hold and supersede this analysis, then create a new attempt for the same candidate."
+        "A는 이 분석을 보류·대체하고 같은 변경 문서에 대한 새 분석 시도를 만듭니다."
     ),
 }
 
@@ -110,28 +109,27 @@ def queue_row(status: AnalysisStatusView) -> QueueRow:
     policy = status.latest_policy
     outcome = status.latest_outcome
     if outcome is None:
-        gateway_outcome = "Not indexed"
+        gateway_outcome = "미색인"
     elif outcome.indexed:
-        chunk_label = "chunk" if outcome.chunk_count == 1 else "chunks"
-        gateway_outcome = f"Indexed · {outcome.chunk_count} {chunk_label}"
+        gateway_outcome = f"색인됨 · 청크 {outcome.chunk_count}개"
     elif status.state is WorkflowState.AWAITING_APPROVAL:
-        gateway_outcome = "Not indexed · approval pending"
+        gateway_outcome = "미색인 · 승인 대기"
     elif outcome.action.value == "QUARANTINE":
-        gateway_outcome = "Quarantined · not indexed"
+        gateway_outcome = "격리됨 · 미색인"
     else:
-        gateway_outcome = "Held · not indexed"
+        gateway_outcome = "보류 · 미색인"
     return QueueRow(
         analysis_id=status.analysis_id,
         document=status.document_id,
-        revision=f"v{status.version} · attempt {status.attempt}",
+        revision=f"버전 {status.version} · 분석 시도 {status.attempt}",
         workflow=_QUEUE_STATE_LABELS.get(status.state, state_label(status.state)),
-        policy=policy.decision.value if policy else "Not available",
-        requested_action=policy.index_action.value if policy else "Not available",
+        policy=policy.decision.value if policy else "결과 없음",
+        requested_action=policy.index_action.value if policy else "결과 없음",
         gateway_outcome=gateway_outcome,
         prepared=format_timestamp(status.prepared_at),
         changed_by=status.changed_by,
         candidate_sha=short_hash(status.candidate_sha256),
-        audit_chain="Verified" if status.audit_chain_valid else "Verification failed",
+        audit_chain="검증됨" if status.audit_chain_valid else "검증 실패",
     )
 
 
@@ -167,7 +165,7 @@ def short_hash(value: str, *, length: int = 12) -> str:
 
 def format_timestamp(value: datetime | None) -> str:
     if value is None:
-        return "Not recorded"
+        return "기록 없음"
     return value.astimezone(_KST).strftime("%Y-%m-%d %H:%M:%S KST")
 
 

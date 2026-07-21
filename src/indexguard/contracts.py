@@ -22,6 +22,7 @@ class DocumentFormat(StrEnum):
     PDF = "PDF"
     DOCX = "DOCX"
     HWPX = "HWPX"
+    MARKDOWN = "MARKDOWN"
 
 
 class SourceScope(StrEnum):

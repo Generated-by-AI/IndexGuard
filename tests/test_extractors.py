@@ -158,7 +158,7 @@ def test_pdf_rejects_opendataloader_output_that_reintroduces_hidden_text(
     assert snapshot.metadata["opendataloader"]["status"] == "rejected"
 
 
-def test_hwpx_uses_pdf_then_opendataloader_layout_text_when_available(
+def test_hwpx_uses_its_native_owpml_parser_without_a_pdf_conversion(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -166,17 +166,35 @@ def test_hwpx_uses_pdf_then_opendataloader_layout_text_when_available(
     staged = BlobStore(tmp_path / "blobs").stage_path(source)
 
     monkeypatch.setattr(
-        "indexguard.extractors.hwpx.normalize_hwpx_with_opendataloader",
-        lambda *_args, **_kwargs: OpenDataLoaderNormalization(
-            "# Converted HWPX layout\n\nApproval limit: 10",
-            "used",
-        ),
+        "indexguard.extractors.pdf.normalize_pdf_with_opendataloader",
+        lambda *_args, **_kwargs: pytest.fail("HWPX must not invoke the PDF loader"),
     )
 
     snapshot = extract_document(staged, "policy")
 
-    assert snapshot.text == "# Converted HWPX layout\n\nApproval limit: 10"
-    assert snapshot.metadata["opendataloader"]["status"] == "used"
+    assert "Native HWPX fallback text" in snapshot.text
+    assert snapshot.metadata["loader"] == {
+        "name": "owpml-spine",
+        "status": "used",
+        "detail": "direct_hwpx_xml_extraction",
+    }
+
+
+def test_hwpx_accepts_root_relative_manifest_paths(tmp_path) -> None:
+    source = write_hwpx(tmp_path / "hancom.hwpx", "Root-relative HWPX text")
+    with zipfile.ZipFile(source) as package:
+        members = {info.filename: package.read(info.filename) for info in package.infolist()}
+    members["Contents/content.hpf"] = members["Contents/content.hpf"].replace(
+        b'href="header.xml"', b'href="Contents/header.xml"'
+    ).replace(b'href="section0.xml"', b'href="Contents/section0.xml"')
+    with zipfile.ZipFile(source, "w") as package:
+        for name, content in members.items():
+            package.writestr(name, content)
+
+    staged = BlobStore(tmp_path / "blobs").stage_path(source)
+    snapshot = extract_document(staged, "policy")
+
+    assert "Root-relative HWPX text" in snapshot.text
 
 
 def test_legacy_hwp_is_rejected_with_specific_error(tmp_path) -> None:

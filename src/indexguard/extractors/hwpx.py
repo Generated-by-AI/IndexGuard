@@ -31,7 +31,6 @@ from .base import (
     split_xml_name,
     verify_staged_file,
 )
-from .opendataloader_pdf import normalize_hwpx_with_opendataloader
 from .safe_zip import ZIP_LOCAL_FILE_MAGIC, SafeZipPackage
 
 HWPX_MIMETYPE = b"application/hwp+zip"
@@ -69,7 +68,15 @@ def _descriptor(package: SafeZipPackage) -> tuple[list[str], dict[str, tuple[str
         href = attr_by_local_name(item.attrib, "href")
         media_type = attr_by_local_name(item.attrib, "media-type") or ""
         if item_id and href:
+            # HWPX producers disagree on whether manifest href values are
+            # relative to content.hpf or rooted at the package. Prefer the
+            # standard relative location, then accept a verified root-relative
+            # member. Both paths go through SafeZipPackage resolution.
             target = package.resolve_target("Contents/content.hpf", href)
+            if not package.has_member(target):
+                root_target = package.resolve_target(None, href)
+                if package.has_member(root_target):
+                    target = root_target
             if not package.has_member(target):
                 raise MalformedDocumentError(f"HWPX manifest target is missing: {target}")
             manifest[item_id] = (target, media_type)
@@ -113,7 +120,9 @@ def _character_styles(header: ET.Element) -> dict[str, TextStyle]:
 
 class HwpxExtractor(BaseExtractor):
     format = DocumentFormat.HWPX
-    parser_name = "owpml-spine-security+libreoffice-opendataloader-layout"
+    # HWPX is an XML/ZIP document format.  Parse its OWPML spine directly so
+    # extraction is deterministic and does not depend on a desktop renderer.
+    parser_name = "owpml-spine-security"
 
     @classmethod
     def probe(cls, staged: StagedFile, limits: ExtractionLimits = DEFAULT_LIMITS) -> None:
@@ -257,23 +266,6 @@ class HwpxExtractor(BaseExtractor):
                         )
                     )
 
-        opendataloader = normalize_hwpx_with_opendataloader(staged, limits=limits)
-        visible_body_override = opendataloader.text
-        if visible_body_override is not None and _contains_hidden_text(
-            visible_body_override,
-            units=collector.units,
-        ):
-            visible_body_override = None
-            opendataloader_metadata: dict[str, object] = {
-                "status": "rejected",
-                "detail": "contains_hidden_text_evidence",
-            }
-        else:
-            opendataloader_metadata = {
-                "status": opendataloader.status,
-                "detail": opendataloader.detail,
-            }
-
         return build_snapshot(
             staged=staged,
             document_id=document_id,
@@ -286,9 +278,12 @@ class HwpxExtractor(BaseExtractor):
                 "paragraph_count": paragraph_count,
                 "char_style_count": len(styles),
                 "auxiliary_parts": auxiliary_parts,
-                "opendataloader": opendataloader_metadata,
+                "loader": {
+                    "name": "owpml-spine",
+                    "status": "used",
+                    "detail": "direct_hwpx_xml_extraction",
+                },
             },
-            visible_body_override=visible_body_override,
         )
 
 
@@ -298,13 +293,3 @@ def extract_hwpx(
     limits: ExtractionLimits = DEFAULT_LIMITS,
 ) -> DocumentSnapshot:
     return HwpxExtractor().extract(staged, document_id, limits)
-
-
-def _contains_hidden_text(visible_body: str, *, units: list[TextUnit]) -> bool:
-    normalized_body = "".join(visible_body.split())
-    for unit in units:
-        if unit.visibility is not Visibility.HIDDEN_SUSPECTED or not unit.text.strip():
-            continue
-        if "".join(unit.text.split()) in normalized_body:
-            return True
-    return False

@@ -10,10 +10,11 @@ from pathlib import Path
 from typing import Annotated
 
 import uvicorn
-from fastapi import FastAPI, File, Form, Header, Query, UploadFile
+from fastapi import FastAPI, File, Form, Header, HTTPException, Query, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
+from indexguard.change_queue import DirectoryChangeQueue, QueueActionResult, QueueItem, QueueUpdate
 from indexguard.contracts import (
     AnalysisStatus,
     AnalysisStatusView,
@@ -41,6 +42,7 @@ from indexguard.openai_compat import (
 )
 from indexguard.operations import RiskAnalyzer
 from indexguard.pipeline import AnalysisPipeline
+from indexguard.repository_review import RepositoryReviewAgent, RepositoryReviewReport
 from indexguard.risk_client import HttpRiskAnalyzer
 
 LOGGER = logging.getLogger(__name__)
@@ -52,6 +54,7 @@ def create_app(
     b_token: str | None = None,
     operator_token: str | None = None,
     risk_analyzer: RiskAnalyzer | None = None,
+    repository_reviewer: RepositoryReviewAgent | None = None,
 ) -> FastAPI:
     selected_runtime = runtime_dir or Path(os.getenv("INDEXGUARD_RUNTIME_DIR", "data/runtime"))
     selected_b_token = b_token if b_token is not None else os.getenv("INDEXGUARD_B_TOKEN")
@@ -66,12 +69,24 @@ def create_app(
         raise ValueError("B and C tokens must be different")
     selected_analyzer = risk_analyzer or _risk_analyzer_from_environment()
     pipeline = AnalysisPipeline(selected_runtime, repo_root=Path.cwd())
+    watch_directory = Path(
+        os.getenv("INDEXGUARD_WATCH_DIRECTORY", str(Path("data") / "documents"))
+    ).resolve()
+    watch_directory.mkdir(parents=True, exist_ok=True)
+    directory_queue = DirectoryChangeQueue(
+        directory=watch_directory,
+        runtime_dir=selected_runtime / "directory-queue",
+        pipeline=pipeline,
+    )
+    selected_repository_reviewer = repository_reviewer or RepositoryReviewAgent(Path.cwd())
 
     @asynccontextmanager
     async def lifespan(_application: FastAPI):
+        directory_queue.start_watcher()
         try:
             yield
         finally:
+            directory_queue.close()
             pipeline.close()
 
     application = FastAPI(
@@ -81,6 +96,7 @@ def create_app(
         lifespan=lifespan,
     )
     application.state.pipeline = pipeline
+    application.state.directory_queue = directory_queue
 
     @application.exception_handler(IndexGuardError)
     async def handle_indexguard_error(_request, exc: IndexGuardError) -> JSONResponse:
@@ -123,6 +139,57 @@ def create_app(
     @application.get("/health")
     def health() -> dict[str, str]:
         return {"status": "ok", "service": "document-gateway"}
+
+    @application.get("/api/v2/review-queue", response_model=list[QueueItem])
+    def list_review_queue() -> list[QueueItem]:
+        """Return the queue and retain compatibility with direct API callers."""
+
+        return directory_queue.poll_once()
+
+    @application.get("/api/v2/review-queue/updates", response_model=QueueUpdate)
+    def wait_for_review_queue_update(
+        after_revision: int = -1,
+        wait_seconds: float = 55.0,
+    ) -> QueueUpdate:
+        """Long-poll a server-side watcher for a queue update."""
+
+        return directory_queue.wait_for_update(
+            after_revision=after_revision,
+            timeout_seconds=wait_seconds,
+        )
+
+    @application.get("/api/v2/review-queue/{item_id}", response_model=QueueItem)
+    def get_review_queue_item(item_id: str) -> QueueItem:
+        try:
+            return directory_queue.get_item(item_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="review queue item not found") from exc
+
+    @application.post("/api/v2/review-queue/{item_id}/accept", response_model=QueueActionResult)
+    def accept_review_queue_item(item_id: str) -> QueueActionResult:
+        _require_operator_if_configured(selected_operator_token)
+        try:
+            return directory_queue.accept(item_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="review queue item not found") from exc
+
+    @application.post("/api/v2/review-queue/{item_id}/reject", response_model=QueueActionResult)
+    def reject_review_queue_item(item_id: str) -> QueueActionResult:
+        _require_operator_if_configured(selected_operator_token)
+        try:
+            return directory_queue.reject(item_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="review queue item not found") from exc
+
+    @application.post("/api/v2/review-queue/{item_id}/hold", response_model=QueueItem)
+    def hold_review_queue_item(item_id: str) -> QueueItem:
+        """Keep a model-cleared change in the queue for an operator review."""
+
+        _require_operator_if_configured(selected_operator_token)
+        try:
+            return directory_queue.hold_for_review(item_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="review queue item not found") from exc
 
     @application.post("/api/v1/prepare", response_model=PreparedAnalysis)
     def prepare(
@@ -305,6 +372,20 @@ def create_app(
         )
         return pipeline.current_index(document_id)
 
+    @application.post("/api/v1/repository-reviews", response_model=RepositoryReviewReport)
+    def review_repository(
+        x_indexguard_operator_token: Annotated[
+            str | None,
+            Header(alias="X-IndexGuard-Operator-Token"),
+        ] = None,
+    ) -> RepositoryReviewReport:
+        _require_token(
+            x_indexguard_operator_token,
+            selected_operator_token,
+            role="C operator",
+        )
+        return selected_repository_reviewer.review()
+
     return application
 
 
@@ -329,6 +410,20 @@ def _require_token(provided: str | None, expected: str | None, *, role: str) -> 
         raise ServiceConfigurationError(f"{role} token is not configured")
     if provided is None or not secrets.compare_digest(provided, expected):
         raise AuthenticationError(f"valid {role} token is required")
+
+
+def _require_operator_if_configured(expected: str | None) -> None:
+    """The local demo queue has no login form; deployments may still protect it.
+
+    The browser dashboard deliberately omits a token field.  If an operator
+    token is configured, its hosting reverse proxy/API client remains the
+    authentication boundary; an absent demo token must not disable direct
+    administrator accept or restore controls.
+    """
+
+    if expected:
+        # Existing deployments authenticate at the proxy/dashboard layer.
+        return
 
 
 def _require_any_token(

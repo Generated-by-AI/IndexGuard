@@ -1,3 +1,5 @@
+@import url("https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;600;700&display=swap");
+
 :root {
   --ig-ink: #172830;
   --ig-muted: #586b75;
@@ -21,10 +23,39 @@
   --ig-space-xl: 2rem;
 }
 
+html,
+body,
+[data-testid="stAppViewContainer"],
+[data-testid="stAppViewContainer"] * {
+  font-family: "Noto Sans KR", "Pretendard", "Malgun Gothic", sans-serif;
+}
+
+/* Preserve Streamlit's icon font after applying the Korean text font globally. */
+[data-testid="stAppViewContainer"] .material-symbols-rounded,
+[data-testid="stAppViewContainer"] [class*="material-symbols"],
+[data-testid="stAppViewContainer"] [data-testid="stIconMaterial"] {
+  font-family: "Material Symbols Rounded" !important;
+}
+
 /* Streamlit has no public page-padding option; keep this one stable hook scoped to framing. */
 [data-testid="stMainBlockContainer"] {
+  max-width: 76rem;
   padding-bottom: 2rem;
   padding-top: 2rem;
+}
+
+[data-testid="stMainBlockContainer"] > div {
+  gap: 0.5rem;
+}
+
+[data-testid="stDataFrame"] {
+  border: 1px solid var(--ig-line);
+  border-radius: var(--ig-radius);
+  overflow: hidden;
+}
+
+[data-testid="stAlert"] {
+  border-radius: var(--ig-radius);
 }
 
 .ig-masthead {
@@ -143,7 +174,7 @@
 .ig-chain ol {
   display: grid;
   gap: var(--ig-space-lg);
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   list-style: none;
   margin: 0;
   padding: 0;
@@ -412,117 +443,42 @@
   color: var(--ig-muted);
 }
 
-.ig-rag-empty {
-  border-bottom: 1px solid var(--ig-line);
-  border-top: 1px solid var(--ig-line);
-  display: grid;
-  gap: var(--ig-space-xs);
-  margin: var(--ig-space-md) 0;
-  padding: var(--ig-space-lg) 0;
-}
-
-.ig-rag-empty strong,
-.ig-rag-question p,
-.ig-rag-answer p {
-  color: var(--ig-ink);
-}
-
-.ig-rag-empty span,
-.ig-rag-mode,
-.ig-rag-no-source {
-  color: var(--ig-muted);
-  font-size: 0.8125rem;
-}
-
-.ig-rag-exchange {
-  border-top: 1px solid var(--ig-line-strong);
-  margin: var(--ig-space-lg) 0;
-}
-
-.ig-rag-question,
-.ig-rag-answer {
-  display: grid;
-  gap: var(--ig-space-md);
-  grid-template-columns: 3.5rem minmax(0, 1fr);
-  padding: var(--ig-space-md) var(--ig-space-sm);
-}
-
-.ig-rag-question {
-  border-left: 3px solid var(--ig-accent);
-  border-bottom: 1px solid var(--ig-line);
-}
-
-.ig-rag-answer {
-  padding-bottom: var(--ig-space-lg);
-  padding-top: var(--ig-space-lg);
-}
-
-.ig-rag-question p,
-.ig-rag-answer p {
-  line-height: 1.6;
-  margin: 0;
-  max-width: 78ch;
-  overflow-wrap: anywhere;
-}
-
-.ig-rag-sequence,
-.ig-rag-source-head strong,
-.ig-rag-score {
-  color: var(--ig-accent);
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: 0.8125rem;
-  font-variant-numeric: tabular-nums;
-  font-weight: 700;
-  letter-spacing: 0.025em;
-}
-
-.ig-rag-mode {
-  display: block;
-  margin-top: var(--ig-space-sm);
-}
-
-.ig-rag-sources {
-  border: 1px solid var(--ig-line);
+.ig-auto-process {
+  align-items: center;
+  background: rgba(23, 40, 48, 0.9);
+  border: 1px solid #10232b;
   border-radius: var(--ig-radius);
-  list-style: none;
-  margin: 0 0 var(--ig-space-xl) 4.25rem;
-  padding: 0;
+  color: #f7fbfc;
+  display: flex;
+  justify-content: center;
+  min-height: 26rem;
+  padding: var(--ig-space-xl);
+  text-align: center;
 }
 
-.ig-rag-source {
-  border-bottom: 1px solid var(--ig-line);
+.ig-auto-process div {
   display: grid;
   gap: var(--ig-space-sm);
-  padding: var(--ig-space-md);
+  max-width: 30rem;
 }
 
-.ig-rag-source:last-child {
-  border-bottom: 0;
+.ig-auto-process strong {
+  color: #ffffff;
+  font-size: 1.75rem;
+  letter-spacing: -0.02em;
 }
 
-.ig-rag-source-head {
-  align-items: baseline;
-  display: grid;
-  gap: var(--ig-space-sm);
-  grid-template-columns: auto minmax(0, 1fr) auto;
+.ig-auto-process span {
+  color: #d9edf5;
+  font-size: 1.25rem;
+  font-weight: 650;
 }
 
-.ig-rag-source-head span:not(.ig-rag-score),
-.ig-rag-source p {
-  color: var(--ig-muted);
-  font-size: 0.8125rem;
-  overflow-wrap: anywhere;
-}
-
-.ig-rag-source p {
-  line-height: 1.5;
-  margin: 0;
-}
-
-.ig-rag-no-source {
-  border-top: 1px solid var(--ig-line);
-  margin: 0 0 var(--ig-space-lg) 4.25rem;
-  padding: var(--ig-space-md) 0;
+.ig-auto-process p {
+  color: #b8cbd3;
+  font-size: 0.875rem;
+  line-height: 1.6;
+  margin: var(--ig-space-sm) 0 0;
 }
 
 .ig-visually-hidden {
@@ -536,6 +492,18 @@
 }
 
 @media (max-width: 64rem) {
+  /* Streamlit gives columns an inline minimum width.  On a narrow browser
+     that kept the detail pane off-screen; stack the review workspace instead. */
+  [data-testid="stHorizontalBlock"] {
+    flex-direction: column;
+  }
+
+  [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] {
+    flex: 1 1 100% !important;
+    min-width: 0 !important;
+    width: 100% !important;
+  }
+
   .ig-masthead {
     grid-template-columns: 1fr auto;
   }
@@ -589,24 +557,6 @@
 
   .ig-gateway {
     white-space: normal;
-  }
-
-  .ig-rag-question,
-  .ig-rag-answer {
-    grid-template-columns: 1fr;
-  }
-
-  .ig-rag-sources,
-  .ig-rag-no-source {
-    margin-left: 0;
-  }
-
-  .ig-rag-source-head {
-    grid-template-columns: auto minmax(0, 1fr);
-  }
-
-  .ig-rag-score {
-    grid-column: 2;
   }
 }
 

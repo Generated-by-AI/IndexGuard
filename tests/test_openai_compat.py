@@ -13,6 +13,7 @@ from indexguard.openai_compat import (
     OpenAICompatibleClient,
     OpenAICompatibleRiskAnalyzer,
     OpenAICompatibleSettings,
+    _json_object,
 )
 from indexguard.pipeline import AnalysisPipeline
 from tests.fixture_builders import write_pdf
@@ -93,6 +94,52 @@ def test_git_diff_summary_uses_openai_chat_completions_without_auth_for_empty_ke
     assert captured["authorization"] is None
     assert captured["path"] == "/v1/chat/completions"
     assert captured["body"]["model"] == "demo-model"  # type: ignore[index]
+
+
+def test_directory_assessment_requires_and_parses_one_json_object() -> None:
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {
+                                    "summary": "\ubb38\uc7a5 \ud55c \uacf3\uc758 \ud45c\ud604\uc744 \uc815\ub9ac\ud588\uc2b5\ub2c8\ub2e4.",
+                                    "review_required": False,
+                                    "review_reason": "",
+                                }
+                            )
+                        }
+                    }
+                ]
+            },
+        )
+
+    client = OpenAICompatibleClient(
+        OpenAICompatibleSettings(base_url="http://127.0.0.1:9001/v1", model="demo"),
+        transport=httpx.MockTransport(handler),
+    )
+    assessment = client.assess_directory_change(
+        path="notice.md",
+        change_type="MODIFY",
+        before_text="Before text.",
+        after_text="After text.",
+    )
+
+    assert assessment.review_required is False
+    assert assessment.summary.startswith("\ubb38\uc7a5")
+    assert captured["body"]["response_format"] == {"type": "json_object"}  # type: ignore[index]
+    assert captured["body"]["reasoning_format"] == "none"  # type: ignore[index]
+    assert captured["body"]["chat_template_kwargs"] == {"enable_thinking": False}  # type: ignore[index]
+    system_prompt = captured["body"]["messages"][0]["content"]  # type: ignore[index]
+    assert "particles, punctuation" in system_prompt
+    assert "person's or entity's name" in system_prompt
+    assert "number/value" in system_prompt
 
 
 def test_model_is_discovered_when_not_configured() -> None:
@@ -241,3 +288,11 @@ def test_oversized_completion_response_is_rejected() -> None:
 
     with pytest.raises(ExternalServiceError, match="oversized"):
         client.analyze_agent_task(task="review", evidence={})
+
+
+def test_empty_llamacpp_think_wrapper_is_ignored_for_json_mode() -> None:
+    payload = '{"summary":"ok","review_required":false,"review_reason":""}'
+
+    assert _json_object(f"<think>\n\n</think>\n\n{payload}") == payload
+    with pytest.raises(ValueError, match="one JSON object"):
+        _json_object(f"<think>hidden reasoning</think>{payload}")

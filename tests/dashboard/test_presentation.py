@@ -47,10 +47,10 @@ def _status(
 
 def test_queue_row_keeps_workflow_policy_action_and_outcome_separate() -> None:
     prepared = queue_row(_status())
-    assert prepared.workflow == "Prepared"
-    assert prepared.policy == "Not available"
-    assert prepared.requested_action == "Not available"
-    assert prepared.gateway_outcome == "Not indexed"
+    assert prepared.workflow == "분석 준비됨"
+    assert prepared.policy == "결과 없음"
+    assert prepared.requested_action == "결과 없음"
+    assert prepared.gateway_outcome == "미색인"
 
     policy = PolicyResult(
         decision=Decision.ALLOW,
@@ -75,13 +75,13 @@ def test_queue_row_keeps_workflow_policy_action_and_outcome_separate() -> None:
             allowed=[OperatorAction.APPROVE, OperatorAction.HOLD, OperatorAction.REANALYZE],
         )
     )
-    assert awaiting.workflow == "Approval pending"
+    assert awaiting.workflow == "승인 대기"
     assert awaiting.policy == "ALLOW"
     assert awaiting.requested_action == "INDEX"
-    assert awaiting.gateway_outcome == "Not indexed · approval pending"
+    assert awaiting.gateway_outcome == "미색인 · 승인 대기"
 
     requested = queue_row(_status(state=WorkflowState.ANALYSIS_REQUESTED))
-    assert requested.workflow == "Requested"
+    assert requested.workflow == "요청됨"
 
     indexed = queue_row(
         _status(
@@ -97,7 +97,7 @@ def test_queue_row_keeps_workflow_policy_action_and_outcome_separate() -> None:
             ),
         )
     )
-    assert indexed.gateway_outcome == "Indexed · 1 chunk"
+    assert indexed.gateway_outcome == "색인됨 · 청크 1개"
 
 
 def test_filters_match_identity_actor_and_authoritative_state() -> None:
@@ -116,7 +116,7 @@ def test_filters_match_identity_actor_and_authoritative_state() -> None:
 
 
 def test_action_copy_is_precise_and_never_constructs_a_policy() -> None:
-    assert action_label(OperatorAction.APPROVE) == "Approve verified result for indexing"
-    assert action_label(OperatorAction.HOLD) == "Continue holding candidate"
-    assert action_label(OperatorAction.REANALYZE) == "Create new analysis attempt"
-    assert state_label(WorkflowState.ANALYSIS_FAILED) == "Analysis failed"
+    assert action_label(OperatorAction.APPROVE) == "검토 결과 승인 및 색인"
+    assert action_label(OperatorAction.HOLD) == "변경 문서 계속 보류"
+    assert action_label(OperatorAction.REANALYZE) == "새 분석 시도 만들기"
+    assert state_label(WorkflowState.ANALYSIS_FAILED) == "분석 실패"

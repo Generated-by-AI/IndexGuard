@@ -4,8 +4,7 @@ from __future__ import annotations
 
 from html import escape
 
-from apps.dashboard.presentation import format_timestamp, short_hash, state_label, state_tone
-from apps.dashboard.rag_chat import RagExchange
+from apps.dashboard.presentation import format_timestamp, state_label, state_tone
 from indexguard.contracts import (
     AnalysisStatusView,
     ChangeKind,
@@ -14,34 +13,31 @@ from indexguard.contracts import (
 )
 
 _CHANGE_LABELS = {
-    ChangeKind.ADD: "Added",
-    ChangeKind.DELETE: "Removed",
-    ChangeKind.REPLACE: "Changed",
+    ChangeKind.ADD: "추가",
+    ChangeKind.DELETE: "삭제",
+    ChangeKind.REPLACE: "변경",
 }
 
 
 def render_identity(analysis: PreparedAnalysis) -> str:
-    baseline = analysis.baseline
     candidate = analysis.candidate
     rows = (
-        ("Document ID", analysis.document_id),
-        ("Analysis ID", analysis.analysis_id),
-        ("Candidate file", candidate.filename),
-        ("Format", candidate.format.value),
-        ("Revision", f"v{analysis.version} · attempt {analysis.analysis_attempt}"),
-        ("Changed by", analysis.changed_by),
-        ("Prepared", format_timestamp(analysis.prepared_at)),
-        ("Code revision", analysis.code_revision or "Not recorded"),
-        ("Baseline SHA-256", baseline.sha256),
-        ("Candidate SHA-256", candidate.sha256),
+        ("문서 ID", analysis.document_id),
+        ("분석 ID", analysis.analysis_id),
+        ("변경 문서 파일", candidate.filename),
+        ("형식", candidate.format.value),
+        ("분석 버전", f"버전 {analysis.version} · 분석 시도 {analysis.analysis_attempt}"),
+        ("변경 주체", analysis.changed_by),
+        ("준비 시각", format_timestamp(analysis.prepared_at)),
+        ("코드 버전", analysis.code_revision or "기록 없음"),
     )
     body = "".join(
         f'<div class="ig-identity-row"><dt>{escape(label)}</dt><dd>{escape(str(value))}</dd></div>'
         for label, value in rows
     )
     return (
-        '<section class="ig-identity" aria-label="Document and version identity">'
-        '<h3 class="ig-section-title">Document identity</h3>'
+        '<section class="ig-identity" aria-label="문서 정보">'
+        '<h3 class="ig-section-title">문서 정보</h3>'
         f"<dl>{body}</dl>"
         "</section>"
     )
@@ -51,9 +47,9 @@ def render_diff(analysis: PreparedAnalysis) -> str:
     changes = analysis.diff.changes
     if not changes:
         return (
-            '<section class="ig-empty" aria-label="Document changes">'
-            "<strong>No normalized text changes</strong>"
-            "<span>The gateway returned no additions, removals, or replacements.</span>"
+            '<section class="ig-empty" aria-label="문서 변경">'
+            "<strong>정규화된 텍스트 변경이 없습니다</strong>"
+            "<span>게이트웨이가 추가·삭제·교체된 텍스트를 반환하지 않았습니다.</span>"
             "</section>"
         )
     rows = []
@@ -75,57 +71,51 @@ def render_diff(analysis: PreparedAnalysis) -> str:
     return (
         '<div class="ig-table-wrap">'
         '<table class="ig-diff-table">'
-        '<caption class="ig-visually-hidden">Normalized document changes</caption>'
-        "<thead><tr><th>#</th><th>Change</th><th>Trusted baseline</th>"
-        "<th>Candidate</th></tr></thead>"
+        '<caption class="ig-visually-hidden">정규화된 문서 변경</caption>'
+        "<thead><tr><th>#</th><th>변경 유형</th><th>기준 문서</th>"
+        "<th>변경 문서</th></tr></thead>"
         f"<tbody>{''.join(rows)}</tbody>"
         "</table></div>"
     )
 
 
-def render_provenance_chain(
-    analysis: PreparedAnalysis,
-    status: AnalysisStatusView,
-) -> str:
+def render_review_outcomes(status: AnalysisStatusView) -> str:
     policy = status.latest_policy
     outcome = status.latest_outcome
     policy_value = (
         f"{policy.decision.value} + {policy.index_action.value}"
         if policy is not None
-        else "Policy unavailable"
+        else "정책 결과 없음"
     )
     policy_detail = (
-        f"Risk score {policy.risk_score} · server validated"
+        f"위험 점수 {policy.risk_score} · 서버 검증 완료"
         if policy is not None
-        else "No B result has been accepted"
+        else "수락된 B 분석 결과가 없습니다"
     )
     if outcome is None:
-        outcome_value = "Not indexed"
+        outcome_value = "미색인"
         outcome_detail = state_label(status.state)
         outcome_tone = state_tone(status.state)
     elif outcome.indexed:
-        outcome_value = "Indexed"
-        chunk_label = "chunk" if outcome.chunk_count == 1 else "chunks"
-        outcome_detail = f"{outcome.chunk_count} {chunk_label} · {_outcome_reason(outcome.reason)}"
+        outcome_value = "색인됨"
+        outcome_detail = f"청크 {outcome.chunk_count}개 · {_outcome_reason(outcome.reason)}"
         outcome_tone = "allow"
     elif status.state.value == "AWAITING_APPROVAL":
-        outcome_value = "Not indexed"
-        outcome_detail = "Approval pending"
+        outcome_value = "미색인"
+        outcome_detail = "승인 대기"
         outcome_tone = "review"
     elif outcome.action is IndexAction.QUARANTINE:
-        outcome_value = "Quarantined · not indexed"
+        outcome_value = "격리됨 · 미색인"
         outcome_detail = _outcome_reason(outcome.reason)
         outcome_tone = "block"
     else:
-        outcome_value = "Held · not indexed"
+        outcome_value = "보류 · 미색인"
         outcome_detail = _outcome_reason(outcome.reason)
         outcome_tone = "review"
 
     steps = (
-        ("Baseline", short_hash(analysis.baseline.sha256), "Trusted version", "neutral"),
-        ("Candidate", short_hash(analysis.candidate.sha256), "Staged evidence", "neutral"),
-        ("Policy result", policy_value, policy_detail, _policy_tone(status)),
-        ("Gateway outcome", outcome_value, outcome_detail, outcome_tone),
+        ("정책 결과", policy_value, policy_detail, _policy_tone(status)),
+        ("게이트웨이 결과", outcome_value, outcome_detail, outcome_tone),
     )
     items = "".join(
         '<li class="ig-chain-step">'
@@ -137,55 +127,14 @@ def render_provenance_chain(
         for label, value, detail, tone in steps
     )
     audit = (
-        "Audit chain verified" if status.audit_chain_valid else "Audit chain verification failed"
+        "감사 체인 검증 완료" if status.audit_chain_valid else "감사 체인 검증 실패"
     )
     audit_tone = "allow" if status.audit_chain_valid else "block"
     return (
-        '<section class="ig-chain" aria-label="Authoritative provenance chain">'
+        '<section class="ig-chain" aria-label="검증된 처리 흐름">'
         f"<ol>{items}</ol>"
         f'<p class="ig-chain-audit ig-tone-{audit_tone}">{escape(audit)}</p>'
         "</section>"
-    )
-
-
-def render_rag_exchange(exchange: RagExchange, *, sequence: int) -> str:
-    """Render one escaped Q/A entry with its retrieved source ledger."""
-
-    label = f"{sequence:02d}"
-    answer = escape(exchange.answer).replace("\n", "<br>")
-    source_rows = "".join(
-        (
-            '<li class="ig-rag-source">'
-            '<div class="ig-rag-source-head">'
-            f"<strong>[S{index}]</strong><span>{escape(hit.document_id)} · "
-            f"chunk {hit.chunk_index} · sha {escape(short_hash(hit.sha256))}</span>"
-            f'<span class="ig-rag-score">score {hit.score:.2f}</span>'
-            "</div>"
-            f"<p>{escape(hit.text)}</p>"
-            "</li>"
-        )
-        for index, hit in enumerate(exchange.citations, start=1)
-    )
-    sources = (
-        f'<ol class="ig-rag-sources" aria-label="Retrieved source ledger">{source_rows}</ol>'
-        if source_rows
-        else '<p class="ig-rag-no-source">No approved indexed source matched.</p>'
-    )
-    mode = (
-        "Generated explanation · verify against sources" if exchange.generated else "No model call"
-    )
-    return (
-        '<article class="ig-rag-exchange">'
-        '<div class="ig-rag-question">'
-        f'<span class="ig-rag-sequence">Q {label}</span>'
-        f"<p>{escape(exchange.question)}</p>"
-        "</div>"
-        '<div class="ig-rag-answer">'
-        f'<span class="ig-rag-sequence">A {label}</span>'
-        f'<div><p>{answer}</p><span class="ig-rag-mode">{escape(mode)}</span></div>'
-        "</div>"
-        f"{sources}"
-        "</article>"
     )
 
 
@@ -206,11 +155,11 @@ def _location_summary(locations) -> str:
     parts = []
     for location in locations[:3]:
         if location.page is not None:
-            parts.append(f"page {location.page}")
+            parts.append(f"페이지 {location.page}")
         elif location.section is not None:
-            parts.append(f"section {location.section}")
+            parts.append(f"섹션 {location.section}")
         elif location.paragraph_id:
-            parts.append(f"paragraph {location.paragraph_id}")
+            parts.append(f"문단 {location.paragraph_id}")
         elif location.part:
             parts.append(location.part)
     if not parts:
@@ -220,16 +169,16 @@ def _location_summary(locations) -> str:
 
 def _outcome_reason(reason: str) -> str:
     labels = {
-        "POLICY_ALLOW_INDEXED": "Policy allowed; chunks committed",
-        "INDEX_NOT_REQUESTED": "Approval required before indexing",
-        "POLICY_REVIEW_HOLD": "Policy requires review",
-        "POLICY_BLOCK": "Policy blocked candidate",
-        "OPERATOR_HOLD": "Operator continued hold",
-        "OPERATOR_REANALYZE_HOLD": "Held for reanalysis",
+        "POLICY_ALLOW_INDEXED": "정책 허용 · 청크 색인 완료",
+        "INDEX_NOT_REQUESTED": "색인 전 승인이 필요합니다",
+        "POLICY_REVIEW_HOLD": "정책 검토가 필요합니다",
+        "POLICY_BLOCK": "정책이 변경 문서를 차단했습니다",
+        "OPERATOR_HOLD": "운영자가 보류를 유지했습니다",
+        "OPERATOR_REANALYZE_HOLD": "재분석을 위해 보류했습니다",
     }
     if reason in labels:
         return labels[reason]
     if reason.startswith("HARD_BLOCK_ARTIFACT:"):
         artifact_types = reason.partition(":")[2].replace("_", " ").lower()
-        return f"Hard block: {artifact_types}"
+        return f"기술적 차단: {artifact_types}"
     return reason.replace("_", " ").replace(":", ": ").capitalize()

@@ -9,12 +9,15 @@ from indexguard.storage import StagedFile
 from .base import DEFAULT_LIMITS, BaseExtractor, ExtractionLimits
 from .docx import DocxExtractor
 from .hwpx import HwpxExtractor
+from .markdown import MarkdownExtractor
 from .pdf import PdfExtractor
 
 _BY_SUFFIX: dict[str, type[BaseExtractor]] = {
     ".pdf": PdfExtractor,
     ".docx": DocxExtractor,
     ".hwpx": HwpxExtractor,
+    ".md": MarkdownExtractor,
+    ".markdown": MarkdownExtractor,
 }
 
 

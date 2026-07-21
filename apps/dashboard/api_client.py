@@ -7,9 +7,8 @@ risk decision or calls storage/indexer internals.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
 from ipaddress import ip_address
-from typing import Any, Literal
+from typing import Any
 from urllib.parse import urlsplit
 
 import httpx
@@ -17,16 +16,14 @@ from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 
 from indexguard.contracts import (
     AnalysisStatusView,
-    CurrentIndexView,
     IndexAction,
-    IndexSearchHit,
-    IndexSearchResponse,
     OperatorAction,
     OperatorCommand,
     OperatorCommandResult,
     PreparedAnalysis,
     WorkflowState,
 )
+from indexguard.repository_review import RepositoryReviewReport
 
 _STATUS_LIST = TypeAdapter(list[AnalysisStatusView])
 
@@ -36,19 +33,79 @@ class _StrictView(BaseModel):
 
 
 class HealthStatus(_StrictView):
-    status: Literal["ok"]
-    service: Literal["document-gateway"]
+    status: str
+    service: str
 
 
-SearchHit = IndexSearchHit
-SearchResponse = IndexSearchResponse
+class SearchHit(_StrictView):
+    document_id: str
+    sha256: str
+    chunk_index: int
+    text: str
 
 
-@dataclass(frozen=True, slots=True)
-class UploadDocument:
+class SearchResponse(_StrictView):
+    query: str
+    results: list[SearchHit]
+
+
+class DocumentInfo(_StrictView):
     filename: str
-    content: bytes
-    content_type: str | None = None
+    format: str
+    parser_name: str
+    parser_version: str
+    extracted_characters: int
+    artifact_count: int
+    artifacts: list[str] = []
+    extraction_status: str
+
+
+class ChangedValue(_StrictView):
+    kind: str
+    before: str = ""
+    after: str = ""
+
+
+class ReviewQueueItem(_StrictView):
+    id: str
+    path: str
+    change_type: str
+    status: str
+    baseline_sha256: str | None = None
+    candidate_sha256: str | None = None
+    summary_status: str
+    summary: str | None = None
+    summary_error: str | None = None
+    created_at: str
+    updated_at: str
+    before_text: str = ""
+    after_text: str = ""
+    review_required: bool | None = None
+    review_reason: str | None = None
+    auto_processing: bool = False
+    auto_process_at: str | None = None
+    baseline_document: DocumentInfo | None = None
+    candidate_document: DocumentInfo | None = None
+    changed_values: list[ChangedValue] = []
+    agent_status: str = "NOT_REQUIRED"
+    agent_report: str | None = None
+    agent_error: str | None = None
+    agent_evidence: list[dict[str, str]] = []
+
+
+class ReviewQueueAction(_StrictView):
+    id: str
+    action: str
+    path: str
+    message: str
+
+
+class ReviewQueueUpdate(_StrictView):
+    revision: int
+    items: list[ReviewQueueItem]
+
+
+_REVIEW_QUEUE_LIST = TypeAdapter(list[ReviewQueueItem])
 
 
 class DashboardApiError(RuntimeError):
@@ -77,7 +134,7 @@ class DashboardApiClient:
         base_url: str,
         *,
         operator_token: str | None = None,
-        timeout: httpx.Timeout | float = 65.0,
+        timeout: httpx.Timeout | float = 70.0,
         transport: httpx.BaseTransport | None = None,
     ) -> None:
         self._base_url = _validate_base_url(base_url)
@@ -122,34 +179,6 @@ class DashboardApiClient:
         )
         return self._validate(PreparedAnalysis, payload)
 
-    def prepare(
-        self,
-        *,
-        document_id: str,
-        changed_by: str,
-        baseline: UploadDocument,
-        candidate: UploadDocument,
-    ) -> PreparedAnalysis:
-        files = {
-            "baseline_file": (
-                baseline.filename,
-                baseline.content,
-                baseline.content_type or "application/octet-stream",
-            ),
-            "candidate_file": (
-                candidate.filename,
-                candidate.content,
-                candidate.content_type or "application/octet-stream",
-            ),
-        }
-        payload = self._request_json(
-            "POST",
-            "/api/v1/prepare",
-            data={"document_id": document_id, "changed_by": changed_by},
-            files=files,
-        )
-        return self._validate(PreparedAnalysis, payload)
-
     def dispatch_analysis(self, analysis_id: str) -> AnalysisStatusView:
         payload = self._request_json(
             "POST",
@@ -191,39 +220,52 @@ class DashboardApiClient:
         params: dict[str, object] = {"q": query, "limit": limit}
         if document_id is not None:
             params["document_id"] = document_id
-        payload = self._request_json(
-            "GET",
-            "/api/v1/index/search",
-            headers=self._operator_headers(),
-            params=params,
-        )
-        result = self._validate(SearchResponse, payload)
-        if (
-            result.query != query
-            or result.document_id != document_id
-            or len(result.results) > limit
-            or (
-                document_id is not None
-                and any(hit.document_id != document_id for hit in result.results)
-            )
-        ):
-            raise _invalid_response()
-        identities = {(hit.document_id, hit.sha256, hit.chunk_index) for hit in result.results}
-        if len(identities) != len(result.results):
-            raise _invalid_response()
-        return result
+        payload = self._request_json("GET", "/api/v1/index/search", params=params)
+        return self._validate(SearchResponse, payload)
 
-    def get_current_index(self, document_id: str) -> CurrentIndexView:
+    def review_repository(self) -> RepositoryReviewReport:
+        payload = self._request_json(
+            "POST",
+            "/api/v1/repository-reviews",
+            headers=self._operator_headers(),
+        )
+        return self._validate(RepositoryReviewReport, payload)
+
+    def list_review_queue(self) -> list[ReviewQueueItem]:
+        payload = self._request_json("GET", "/api/v2/review-queue")
+        try:
+            return _REVIEW_QUEUE_LIST.validate_python(payload)
+        except ValidationError as exc:
+            raise _invalid_response() from exc
+
+    def wait_for_review_queue_update(
+        self,
+        *,
+        after_revision: int,
+        wait_seconds: float = 55.0,
+    ) -> ReviewQueueUpdate:
         payload = self._request_json(
             "GET",
-            "/api/v1/index/current",
-            headers=self._operator_headers(),
-            params={"document_id": document_id},
+            "/api/v2/review-queue/updates",
+            params={"after_revision": after_revision, "wait_seconds": wait_seconds},
         )
-        result = self._validate(CurrentIndexView, payload)
-        if result.document_id != document_id:
-            raise _invalid_response()
-        return result
+        return self._validate(ReviewQueueUpdate, payload)
+
+    def get_review_queue_item(self, item_id: str) -> ReviewQueueItem:
+        payload = self._request_json("GET", f"/api/v2/review-queue/{item_id}")
+        return self._validate(ReviewQueueItem, payload)
+
+    def accept_review_queue_item(self, item_id: str) -> ReviewQueueAction:
+        payload = self._request_json("POST", f"/api/v2/review-queue/{item_id}/accept")
+        return self._validate(ReviewQueueAction, payload)
+
+    def reject_review_queue_item(self, item_id: str) -> ReviewQueueAction:
+        payload = self._request_json("POST", f"/api/v2/review-queue/{item_id}/reject")
+        return self._validate(ReviewQueueAction, payload)
+
+    def hold_review_queue_item(self, item_id: str) -> ReviewQueueItem:
+        payload = self._request_json("POST", f"/api/v2/review-queue/{item_id}/hold")
+        return self._validate(ReviewQueueItem, payload)
 
     def _operator_headers(self) -> dict[str, str]:
         if self._operator_token is None:
