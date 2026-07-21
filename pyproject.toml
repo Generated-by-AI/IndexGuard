@@ -25,6 +25,9 @@ dev = [
   "pytest>=8,<10",
   "ruff>=0.11,<1",
 ]
+dashboard = [
+  "streamlit>=1.59,<2",
+]
 
 [project.scripts]
 indexguard-api = "indexguard.api:run"
@@ -35,7 +38,12 @@ indexguard-watch = "indexguard.watcher:main"
 indexguard-watch-git = "indexguard.git_watcher:main"
 
 [tool.setuptools.packages.find]
-where = ["src"]
+where = ["src", "."]
+include = ["indexguard*", "apps*"]
+exclude = ["tests*"]
+
+[tool.setuptools.package-data]
+"apps.dashboard" = ["assets/*.css"]
 
 [tool.pytest.ini_options]
 addopts = "-ra"
