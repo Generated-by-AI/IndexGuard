@@ -14,6 +14,8 @@ from enum import StrEnum
 from pathlib import Path
 from threading import Event
 
+from indexguard.openai_compat import OpenAICompatibleClient, OpenAICompatibleSettings
+
 DEFAULT_MAX_PATCH_BYTES = 1024 * 1024
 DEFAULT_GIT_TIMEOUT_SECONDS = 10.0
 SUPPORTED_DOCUMENT_EXTENSIONS = frozenset({".docx", ".hwpx", ".pdf"})
@@ -237,8 +239,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--once", action="store_true", help="capture one snapshot and exit")
     parser.add_argument("--max-cycles", type=int)
     parser.add_argument("--max-patch-bytes", type=int, default=DEFAULT_MAX_PATCH_BYTES)
+    parser.add_argument(
+        "--summarize",
+        action="store_true",
+        help="generate an OpenAI-compatible Korean summary for every emitted Git diff event",
+    )
     arguments = parser.parse_args(argv)
     max_cycles = 1 if arguments.once else arguments.max_cycles
+    summarizer = (
+        OpenAICompatibleClient(OpenAICompatibleSettings.from_environment())
+        if arguments.summarize
+        else None
+    )
 
     try:
         for event in watch_git_diff(
@@ -250,7 +262,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         ):
             # ASCII-escaped JSON stays valid even when Windows redirects stdout
             # through a legacy code page that cannot encode document text.
-            print(json.dumps(event.to_dict(), ensure_ascii=True, sort_keys=True), flush=True)
+            payload = event.to_dict()
+            if summarizer is not None:
+                payload["summary"] = summarizer.summarize_git_diff(event)
+            print(json.dumps(payload, ensure_ascii=True, sort_keys=True), flush=True)
     except KeyboardInterrupt:
         return 130
     except GitWatcherError as exc:

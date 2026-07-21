@@ -17,6 +17,8 @@ IndexGuard는 **PDF·DOCX·HWPX 문서를 정규화·비교하고, 독립 AI 위
 
 HWPX는 한컴 후원 맥락을 보여주는 **대표 입력 형식(P0)** 입니다. PDF와 DOCX도 같은 분석 파이프라인으로 지원하지만, 레거시 바이너리 `.hwp`는 이번 MVP에서 다루지 않습니다.
 
+PDF는 OpenDataLoader PDF의 읽기 순서 기반 Markdown 정규화를 우선 사용하고, PyMuPDF로 활성 콘텐츠와 숨김·투명·가림 텍스트를 별도로 검사합니다. OpenDataLoader PDF는 Java 11+가 필요합니다. Java 또는 도구가 준비되지 않은 실행 환경에서는 보안 검사를 유지하기 위해 PyMuPDF 정규화로 안전하게 되돌아갑니다. HWPX는 먼저 기존 OWPML ZIP/XML 보안 파서로 검증한 뒤, LibreOffice headless로 임시 PDF를 만들고 OpenDataLoader PDF 정규화를 적용합니다. LibreOffice 또는 OpenDataLoader를 사용할 수 없거나 변환 결과가 숨김 텍스트를 다시 포함하면, HWPX는 네이티브 보안 파서의 정규화 결과로 안전하게 되돌아갑니다.
+
 ## 핵심 파이프라인
 
 ```text
@@ -113,6 +115,18 @@ Git 저장소의 working tree diff를 직접 감시할 수도 있습니다.
 uv run indexguard-watch-git . --interval 1
 uv run indexguard-watch-git . --once
 ```
+
+제품 시연에서는 OpenAI 호환 API를 이용해 각 Git diff 이벤트의 요약을 함께 출력할 수 있습니다.
+기본 API 주소는 `http://100.102.81.122:8000/v1`이며 API 키는 빈 값으로 둡니다. 모델 이름을
+지정하지 않으면 서버의 `/models` 응답에서 첫 모델을 선택합니다.
+
+```powershell
+uv run indexguard-watch-git . --once --summarize
+```
+
+`OpenAICompatibleClient`는 이후 에이전트 분석에도 같은 연결을 사용합니다. 모델에는 요약 또는
+분석 텍스트만 요청하며, Git diff·문서 evidence에 포함된 지시문을 실행하지 않고 도구 접근이나
+색인 승인 권한도 부여하지 않습니다.
 
 변경 시 `DIRTY / DIFF_CHANGED / CLEAN / HEAD_CHANGED` JSON 이벤트가 발생하며 staged·unstaged 패치, 미추적 파일명, 변경된 PDF/DOCX/HWPX 경로를 제공합니다. 미추적 파일 내용과 바이너리 payload는 출력하지 않고 패치 크기는 기본 1MiB로 제한합니다. 이 감시는 변경 증거를 제공할 뿐 자동 승인이나 RAG 색인을 수행하지 않습니다.
 

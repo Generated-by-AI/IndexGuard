@@ -31,6 +31,7 @@ from .base import (
     split_xml_name,
     verify_staged_file,
 )
+from .opendataloader_pdf import normalize_hwpx_with_opendataloader
 from .safe_zip import ZIP_LOCAL_FILE_MAGIC, SafeZipPackage
 
 HWPX_MIMETYPE = b"application/hwp+zip"
@@ -112,7 +113,7 @@ def _character_styles(header: ET.Element) -> dict[str, TextStyle]:
 
 class HwpxExtractor(BaseExtractor):
     format = DocumentFormat.HWPX
-    parser_name = "owpml-spine-security"
+    parser_name = "owpml-spine-security+libreoffice-opendataloader-layout"
 
     @classmethod
     def probe(cls, staged: StagedFile, limits: ExtractionLimits = DEFAULT_LIMITS) -> None:
@@ -256,6 +257,23 @@ class HwpxExtractor(BaseExtractor):
                         )
                     )
 
+        opendataloader = normalize_hwpx_with_opendataloader(staged, limits=limits)
+        visible_body_override = opendataloader.text
+        if visible_body_override is not None and _contains_hidden_text(
+            visible_body_override,
+            units=collector.units,
+        ):
+            visible_body_override = None
+            opendataloader_metadata: dict[str, object] = {
+                "status": "rejected",
+                "detail": "contains_hidden_text_evidence",
+            }
+        else:
+            opendataloader_metadata = {
+                "status": opendataloader.status,
+                "detail": opendataloader.detail,
+            }
+
         return build_snapshot(
             staged=staged,
             document_id=document_id,
@@ -268,7 +286,9 @@ class HwpxExtractor(BaseExtractor):
                 "paragraph_count": paragraph_count,
                 "char_style_count": len(styles),
                 "auxiliary_parts": auxiliary_parts,
+                "opendataloader": opendataloader_metadata,
             },
+            visible_body_override=visible_body_override,
         )
 
 
@@ -278,3 +298,13 @@ def extract_hwpx(
     limits: ExtractionLimits = DEFAULT_LIMITS,
 ) -> DocumentSnapshot:
     return HwpxExtractor().extract(staged, document_id, limits)
+
+
+def _contains_hidden_text(visible_body: str, *, units: list[TextUnit]) -> bool:
+    normalized_body = "".join(visible_body.split())
+    for unit in units:
+        if unit.visibility is not Visibility.HIDDEN_SUSPECTED or not unit.text.strip():
+            continue
+        if "".join(unit.text.split()) in normalized_body:
+            return True
+    return False

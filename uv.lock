@@ -321,6 +321,7 @@ dependencies = [
     { name = "fastapi" },
     { name = "httpx" },
     { name = "mcp", extra = ["cli"] },
+    { name = "opendataloader-pdf" },
     { name = "pydantic" },
     { name = "pymupdf" },
     { name = "python-multipart" },
@@ -339,6 +340,7 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.115,<1" },
     { name = "httpx", specifier = ">=0.28,<1" },
     { name = "mcp", extras = ["cli"], specifier = ">=1.28.1,<2" },
+    { name = "opendataloader-pdf", specifier = ">=2.5,<3" },
     { name = "pydantic", specifier = ">=2.10,<3" },
     { name = "pymupdf", specifier = ">=1.25,<2" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8,<10" },
@@ -434,6 +436,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/d6/54/cfe61301667036ec958cb99bd3efefba235e65cdeb9c84d24a8293ba1d90/mdurl-0.1.2.tar.gz", hash = "sha256:bb413d29f5eea38f31dd4754dd7377d4465116fb207585f97bf925588687c1ba", size = 8729, upload-time = "2022-08-14T12:40:10.846Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b3/38/89ba8ad64ae25be8de66a6d463314cf1eb366222074cfda9ee839c56a4b4/mdurl-0.1.2-py3-none-any.whl", hash = "sha256:84008a41e51615a49fc9966191ff91509e3c40b939176e643fd50a5c2196b8f8", size = 9979, upload-time = "2022-08-14T12:40:09.779Z" },
+]
+
+[[package]]
+name = "opendataloader-pdf"
+version = "2.5.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/6c/89/33d36f3020d0e833d9faae509bf53a79df074d0b449c08e6a6cd52ec0305/opendataloader_pdf-2.5.0.tar.gz", hash = "sha256:6e77f876f90ee45c67168c8d79f39bd9ff8c5c85a885ae879a2e6abc0aaba878", size = 22539386, upload-time = "2026-07-14T09:23:40.647Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b1/78/c2e5aab0ad1076fc9f76234f021c622e2344543a6a3622152d220781f94f/opendataloader_pdf-2.5.0-py3-none-any.whl", hash = "sha256:0f415c75bafe824393276ac7814d53858190690e2ab1fce69944ff42f63535b0", size = 22552521, upload-time = "2026-07-14T09:23:37.039Z" },
 ]
 
 [[package]]
