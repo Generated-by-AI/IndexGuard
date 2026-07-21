@@ -40,7 +40,8 @@ PDF / DOCX / HWPX
 ```text
 IndexGuard/
 ├─ apps/
-│  └─ api/                       # FastAPI 호환 진입점
+│  ├─ api/                       # FastAPI 호환 진입점
+│  └─ dashboard/                 # C Streamlit 운영자 증거 워크벤치
 ├─ src/indexguard/
 │  ├─ contracts.py               # 팀 공통 스키마의 단일 기준
 │  ├─ pipeline.py                # 종단간 분석 오케스트레이션
@@ -95,11 +96,32 @@ IndexGuard/
 ## A 문서 게이트웨이 실행
 
 ```powershell
+$env:INDEXGUARD_OPERATOR_TOKEN = "<operator-token>"
 uv sync --extra dev
 uv run indexguard-api
 ```
 
 API는 `http://127.0.0.1:8000`에서 실행되며 상세 흐름은 [A 게이트웨이 문서](docs/A_GATEWAY.md)를 따릅니다.
+
+## C 운영자 콘솔 실행
+
+콘솔은 A의 큐·분석 증거·정책 결과·게이트웨이 결과를 표시하고, A가 현재 상태에서 허용한
+`APPROVE / HOLD / REANALYZE` 명령만 전송합니다. 브라우저에서 위험을 계산하거나 저장소와
+색인기에 직접 접근하지 않습니다.
+
+```powershell
+$env:INDEXGUARD_API_URL = "http://127.0.0.1:8000"
+$env:INDEXGUARD_OPERATOR_TOKEN = "<same-operator-token-as-A>"
+$env:INDEXGUARD_OPERATOR_ACTOR = "<audit-actor-label>"  # 선택 사항
+uv sync --extra dev --extra dashboard
+uv run --extra dashboard streamlit run apps/dashboard/app.py
+```
+
+기본 주소는 `http://localhost:8501`이며 프로젝트 설정이 콘솔을 `127.0.0.1`에만 바인딩합니다.
+외부 인증·접근 제어 없이 이 바인딩을 공용 인터페이스로 변경하지 않습니다. 루프백이 아닌 A
+주소는 HTTPS여야 하며 토큰을 URL에 넣지 않습니다. 운영자 토큰이 없으면 공개 상태 큐는 볼 수
+있지만 상세 증거와 명령은 fail-closed로 차단됩니다. `ALLOW + INDEX` 정책 결과, 요청된 액션,
+실제 색인 결과는 화면에서 별도 사실로 표시됩니다.
 
 지속 폴더 감시는 별도 프로세스로 실행합니다.
 
