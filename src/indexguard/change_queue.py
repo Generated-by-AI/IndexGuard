@@ -12,6 +12,7 @@ import os
 import shutil
 import threading
 import time
+from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from difflib import SequenceMatcher
@@ -25,7 +26,7 @@ from indexguard.extractors.registry import extract_document
 from indexguard.integrity import sha256_file
 from indexguard.openai_compat import OpenAICompatibleClient, OpenAICompatibleSettings
 from indexguard.pipeline import AnalysisPipeline
-from indexguard.scanner import ScanEvent, ScanEventType, scan_once
+from indexguard.scanner import ScanEvent, ScanEventType, ScanStateError, scan_once
 
 AUTO_PROCESS_DELAY_SECONDS = 5
 SUMMARY_RETRY_INTERVAL_SECONDS = 3.0
@@ -89,6 +90,24 @@ class QueueActionResult(BaseModel):
     id: str
     action: str
     path: str
+    message: str
+
+
+class QueueHistoryEntry(BaseModel):
+    """One processed review, ordered by the time the action was applied."""
+
+    model_config = ConfigDict(extra="forbid")
+    id: str
+    path: str
+    change_type: str
+    action: str
+    processed_at: str
+    summary: str | None = None
+
+
+class QueueHistoryRestoreResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    restored_count: int
     message: str
 
 
@@ -158,8 +177,12 @@ class DirectoryChangeQueue:
     def poll_once(self) -> list[QueueItem]:
         """Detect source changes synchronously so new items are visible immediately."""
 
-        result = scan_once(self.directory, self._scan_state)
         with self._lock:
+            # Scanning and applying events must share the same lock as a
+            # timeline restore. Otherwise a watcher can capture the restore's
+            # transient filesystem diff, then enqueue it after the restore has
+            # synchronised the scan state.
+            result = scan_once(self.directory, self._scan_state)
             changed = bool(result.events)
             for event in result.events:
                 self._apply_event(event)
@@ -203,20 +226,18 @@ class DirectoryChangeQueue:
     def reject(self, item_id: str) -> QueueActionResult:
         with self._lock:
             item = self._get_raw(item_id)
-            path = self._source_path(item["path"])
-            change_type = item["change_type"]
-            if change_type == "추가":
-                if path.exists():
-                    actual, _ = sha256_file(path)
-                    if actual == item.get("candidate_sha256"):
-                        path.unlink()
-            else:
-                baseline = item.get("baseline_snapshot")
-                if not baseline:
-                    raise RuntimeError("복구할 기준 문서가 없습니다.")
-                path.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copyfile(self.runtime_dir / baseline, path)
+            before_accepted = deepcopy(self._state["accepted"].get(item["path"]))
+            self._restore_source_to_baseline_locked(item)
             self._state["items"].pop(item_id, None)
+            self._append_history_locked(
+                item,
+                action="RESTORE",
+                accepted_before=before_accepted,
+            )
+            # The restored bytes are now the working-tree truth. Advance the
+            # cursor before releasing the lock so the watcher cannot turn the
+            # administrator's recovery into a second, fresh queue entry.
+            self._synchronise_scan_state_locked()
             self._save_state()
             self._notify_changed_locked()
             return QueueActionResult(
@@ -225,6 +246,80 @@ class DirectoryChangeQueue:
                 path=item["path"],
                 message="변경을 기준 문서 상태로 복구했습니다.",
             )
+
+    def list_history(self) -> list[QueueHistoryEntry]:
+        with self._lock:
+            return [
+                QueueHistoryEntry.model_validate(_public_history(value))
+                for value in self._state["history"]
+            ]
+
+    def restore_history_before(self, history_id: str) -> QueueHistoryRestoreResult:
+        """Restore the selected review and every later review in reverse order."""
+
+        with self._lock:
+            history = self._state["history"]
+            position = next(
+                (index for index, value in enumerate(history) if value["id"] == history_id),
+                None,
+            )
+            if position is None:
+                # The dashboard can submit the same click twice while its
+                # popover is rerendering. A previous restore already removed
+                # the selected entry and all later entries, so treating that
+                # replay as success makes the operation safely idempotent.
+                if history_id in self._state.get("restored_history_ids", []):
+                    return QueueHistoryRestoreResult(
+                        restored_count=0,
+                        message="선택한 검토 기록은 이미 복구되어 있습니다.",
+                    )
+                raise KeyError(history_id)
+            targets = history[position:]
+            self._validate_history_restore_locked(targets)
+            for entry in reversed(history[position:]):
+                self._undo_history_entry_locked(entry)
+            restored_count = len(history) - position
+            restored_ids = self._state.setdefault("restored_history_ids", [])
+            restored_ids.extend(entry["id"] for entry in targets)
+            # Keep the persisted idempotency window bounded; these IDs are
+            # only needed to absorb delayed duplicate dashboard requests.
+            self._state["restored_history_ids"] = restored_ids[-256:]
+            del history[position:]
+            # Record the restored filesystem state so the watcher does not
+            # re-ingest the same files as unrelated fresh changes.
+            self._synchronise_scan_state_locked()
+            self._save_state()
+            self._notify_changed_locked()
+            return QueueHistoryRestoreResult(
+                restored_count=restored_count,
+                message=f"{restored_count}건의 처리 기록을 선택한 검토 이전 상태로 복구했습니다.",
+            )
+
+    def _validate_history_restore_locked(self, entries: list[dict[str, Any]]) -> None:
+        """Fail before mutating state when a retained history cannot be replayed."""
+
+        for entry in entries:
+            item = entry.get("item")
+            if not isinstance(item, dict):
+                raise RuntimeError("복구에 필요한 검토 기록이 손상되었습니다.")
+            self._source_path(str(item.get("path", "")))
+            for snapshot_key in ("baseline_snapshot", "candidate_snapshot"):
+                snapshot = item.get(snapshot_key)
+                if snapshot and not (self.runtime_dir / str(snapshot)).is_file():
+                    raise RuntimeError("복구에 필요한 문서 스냅샷을 찾을 수 없습니다.")
+
+    def _synchronise_scan_state_locked(self) -> None:
+        """Refresh watcher state after a restore, recovering stale scan metadata."""
+
+        try:
+            scan_once(self.directory, self._scan_state)
+        except ScanStateError:
+            # Runtime data can be retained while the watched directory is
+            # moved or reconfigured. The restored files are authoritative at
+            # this point, so discard only the stale scanner cursor and record
+            # a clean baseline rather than failing the completed restore.
+            self._scan_state.unlink(missing_ok=True)
+            scan_once(self.directory, self._scan_state)
 
     def hold_for_review(self, item_id: str) -> QueueItem:
         """Cancel a pending automatic index and retain the item for an operator."""
@@ -485,7 +580,7 @@ class DirectoryChangeQueue:
             if due > now:
                 continue
             try:
-                self._accept_locked(item)
+                self._accept_locked(item, action="AUTO_INDEX")
                 changed = True
             except Exception:
                 item["auto_processing"] = False
@@ -578,7 +673,8 @@ class DirectoryChangeQueue:
                 removed = True
         return removed
 
-    def _accept_locked(self, item: dict[str, Any]) -> None:
+    def _accept_locked(self, item: dict[str, Any], *, action: str = "INDEX") -> None:
+        accepted_before = deepcopy(self._state["accepted"].get(item["path"]))
         document_id = f"watch:{item['path']}"
         if item["change_type"] == "삭제":
             current = self.pipeline.indexer.get_current_version(document_id)
@@ -596,6 +692,103 @@ class DirectoryChangeQueue:
                 "snapshot": item["candidate_snapshot"],
             }
         self._state["items"].pop(item["id"], None)
+        self._append_history_locked(
+            item,
+            action=action,
+            accepted_before=accepted_before,
+        )
+
+    def _append_history_locked(
+        self,
+        item: dict[str, Any],
+        *,
+        action: str,
+        accepted_before: dict[str, Any] | None,
+    ) -> None:
+        self._state["history"].append(
+            {
+                "id": f"rev_{sha256(f'{item['id']}:{_now()}'.encode()).hexdigest()[:16]}",
+                "path": item["path"],
+                "change_type": item["change_type"],
+                "action": action,
+                "processed_at": _now(),
+                "summary": item.get("summary"),
+                "item": deepcopy(item),
+                "accepted_before": accepted_before,
+            }
+        )
+
+    def _undo_history_entry_locked(self, entry: dict[str, Any]) -> None:
+        item = deepcopy(entry["item"])
+        action = entry["action"]
+        if action in {"INDEX", "AUTO_INDEX"}:
+            self._undo_index_locked(item)
+        elif action == "RESTORE":
+            self._restore_source_to_candidate_locked(item)
+        else:
+            raise RuntimeError("unknown review history action")
+        path = item["path"]
+        accepted_before = entry.get("accepted_before")
+        if accepted_before is None:
+            self._state["accepted"].pop(path, None)
+        else:
+            self._state["accepted"][path] = accepted_before
+        # A restored automatic action must not immediately run again using its
+        # old, already-expired deadline. Keep the exact candidate bytes, but
+        # hand the recovered review back to the operator explicitly.
+        item["auto_processing"] = False
+        item["auto_process_at"] = None
+        item["review_required"] = True
+        item["review_reason"] = "검토 기록 복구로 자동 처리가 중지되었습니다."
+        item["updated_at"] = _now()
+        self._state["items"][item["id"]] = item
+
+    def _undo_index_locked(self, item: dict[str, Any]) -> None:
+        document_id = f"watch:{item['path']}"
+        if item["change_type"] == "삭제":
+            self._restore_source_to_baseline_locked(item)
+            baseline = item.get("baseline_snapshot")
+            if baseline:
+                staged = self.pipeline.blobs.stage_path(self.runtime_dir / baseline)
+                snapshot = extract_document(staged, document_id, self.pipeline.limits)
+                current = self.pipeline.indexer.get_current_version(document_id)
+                self.pipeline.indexer.index_atomic(
+                    snapshot,
+                    expected_current_sha256=None if current is None else current.sha256,
+                )
+            return
+        candidate_sha = item.get("candidate_sha256")
+        if candidate_sha:
+            self.pipeline.indexer.remove_atomic(document_id, candidate_sha)
+        # Accepting a change never altered the working file. Returning to the
+        # moment immediately before that accept must therefore restore the
+        # candidate bytes and re-open the same review item.
+        self._restore_source_to_candidate_locked(item)
+
+    def _restore_source_to_baseline_locked(self, item: dict[str, Any]) -> None:
+        path = self._source_path(item["path"])
+        if item["change_type"] == "추가":
+            # There is no accepted baseline for a newly added document. The
+            # operator's explicit recovery request means discard the entire
+            # unindexed file, including edits made after its first snapshot.
+            # Comparing against a stale candidate hash previously left a
+            # later edit on disk and made the queue appear not to recover.
+            path.unlink(missing_ok=True)
+            return
+        baseline = item.get("baseline_snapshot")
+        if not baseline:
+            raise RuntimeError("baseline snapshot is unavailable")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(self.runtime_dir / baseline, path)
+
+    def _restore_source_to_candidate_locked(self, item: dict[str, Any]) -> None:
+        path = self._source_path(item["path"])
+        candidate = item.get("candidate_snapshot")
+        if candidate is None:
+            path.unlink(missing_ok=True)
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(self.runtime_dir / candidate, path)
 
     def _snapshot_document(
         self,
@@ -665,7 +858,7 @@ class DirectoryChangeQueue:
 
     def _load_state(self) -> dict[str, Any]:
         if not self._state_path.exists():
-            return {"accepted": {}, "items": {}}
+            return {"accepted": {}, "items": {}, "history": [], "restored_history_ids": []}
         try:
             value = json.loads(self._state_path.read_text(encoding="utf-8"))
             if (
@@ -673,10 +866,16 @@ class DirectoryChangeQueue:
                 and isinstance(value.get("accepted"), dict)
                 and isinstance(value.get("items"), dict)
             ):
+                value.setdefault("history", [])
+                if not isinstance(value["history"], list):
+                    value["history"] = []
+                value.setdefault("restored_history_ids", [])
+                if not isinstance(value["restored_history_ids"], list):
+                    value["restored_history_ids"] = []
                 return value
         except (OSError, ValueError):
             pass
-        return {"accepted": {}, "items": {}}
+        return {"accepted": {}, "items": {}, "history": [], "restored_history_ids": []}
 
     def _save_state(self) -> None:
         temporary = self._state_path.with_suffix(".tmp")
@@ -771,4 +970,9 @@ def _public_record(value: dict[str, Any]) -> dict[str, Any]:
     """Hide snapshot storage paths from the browser contract."""
 
     fields = set(QueueItem.model_fields)
+    return {key: item for key, item in value.items() if key in fields}
+
+
+def _public_history(value: dict[str, Any]) -> dict[str, Any]:
+    fields = set(QueueHistoryEntry.model_fields)
     return {key: item for key, item in value.items() if key in fields}

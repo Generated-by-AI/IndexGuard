@@ -14,7 +14,14 @@ from fastapi import FastAPI, File, Form, Header, HTTPException, Query, UploadFil
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
-from indexguard.change_queue import DirectoryChangeQueue, QueueActionResult, QueueItem, QueueUpdate
+from indexguard.change_queue import (
+    DirectoryChangeQueue,
+    QueueActionResult,
+    QueueHistoryEntry,
+    QueueHistoryRestoreResult,
+    QueueItem,
+    QueueUpdate,
+)
 from indexguard.contracts import (
     AnalysisStatus,
     AnalysisStatusView,
@@ -190,6 +197,21 @@ def create_app(
             return directory_queue.hold_for_review(item_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="review queue item not found") from exc
+
+    @application.get("/api/v2/review-history", response_model=list[QueueHistoryEntry])
+    def list_review_history() -> list[QueueHistoryEntry]:
+        return directory_queue.list_history()
+
+    @application.post(
+        "/api/v2/review-history/{history_id}/restore",
+        response_model=QueueHistoryRestoreResult,
+    )
+    def restore_review_history(history_id: str) -> QueueHistoryRestoreResult:
+        _require_operator_if_configured(selected_operator_token)
+        try:
+            return directory_queue.restore_history_before(history_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="review history entry not found") from exc
 
     @application.post("/api/v1/prepare", response_model=PreparedAnalysis)
     def prepare(

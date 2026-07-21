@@ -12,9 +12,14 @@ import streamlit as st
 # while tests import it as ``apps.dashboard.app``.  Keep both supported so
 # ordinary dashboard startup cannot fail with ``No module named 'apps'``.
 if __package__:
-    from apps.dashboard.api_client import DashboardApiClient, DashboardApiError, ReviewQueueItem
+    from apps.dashboard.api_client import (
+        DashboardApiClient,
+        DashboardApiError,
+        ReviewHistoryEntry,
+        ReviewQueueItem,
+    )
 else:
-    from api_client import DashboardApiClient, DashboardApiError, ReviewQueueItem
+    from api_client import DashboardApiClient, DashboardApiError, ReviewHistoryEntry, ReviewQueueItem
 
 _CSS_PATH = Path(__file__).parent / "assets" / "indexguard.css"
 _REQUESTED = "\uc694\uccad\ub428"
@@ -85,20 +90,65 @@ def main() -> None:
             f"{exc.message} [{exc.code}]"
         )
         return
-    _render_masthead(client.base_url, health.service, health.status)
+    masthead, history = st.columns([0.82, 0.18], vertical_alignment="center")
+    with masthead:
+        _render_masthead(health.service, health.status)
+    with history:
+        _render_history_menu(client)
     _live_workspace(client)
 
 
-def _render_masthead(base_url: str, service: str, status: str) -> None:
+def _render_masthead(service: str, status: str) -> None:
     st.html(
         '<header class="ig-masthead">'
         '<h1 class="ig-brand">IndexGuard</h1>'
         '<div class="ig-route">\uac10\uc2dc \ub514\ub809\ud130\ub9ac \ubcc0\uacbd \uac80\ud1a0 \ubc0f RAG \uc0c9\uc778 \uad00\ub9ac</div>'
         '<div class="ig-gateway">'
         '<span class="ig-gateway-dot ig-tone-allow" aria-hidden="true"></span>'
-        f'<span>{escape(service)} · {escape(status)} · {escape(base_url)}</span>'
+        f'<span>{escape(service)} · {escape(status)}</span>'
         "</div></header>"
     )
+
+
+def _render_history_menu(client: DashboardApiClient) -> None:
+    """Expose a compact, operator-controlled review timeline in the header."""
+
+    with st.popover("검토 기록", use_container_width=True):
+        st.markdown("#### 처리된 검토")
+        try:
+            history = client.list_review_history()
+        except DashboardApiError as exc:
+            st.error(f"검토 기록을 불러오지 못했습니다: {exc.message} [{exc.code}]")
+            return
+        if not history:
+            st.caption("아직 처리된 검토가 없습니다.")
+            return
+        for entry in reversed(history):
+            _render_history_entry(client, entry)
+
+
+def _render_history_entry(client: DashboardApiClient, entry: ReviewHistoryEntry) -> None:
+    labels = {"INDEX": "색인", "AUTO_INDEX": "자동 색인", "RESTORE": "복구"}
+    st.markdown(
+        f"**{escape(entry.path)}** · {labels.get(entry.action, entry.action)}  \\"
+        f"\n{escape(entry.processed_at)}"
+    )
+    if entry.summary:
+        st.caption(entry.summary)
+    if st.button(
+        "이 검토 처리 전으로 복구",
+        key=f"restore-history-{entry.id}",
+        width="stretch",
+    ):
+        try:
+            result = client.restore_review_history(entry.id)
+        except DashboardApiError as exc:
+            st.error(f"검토 기록 복구에 실패했습니다: {exc.message} [{exc.code}]")
+            return
+        st.session_state.pop("selected_queue_item", None)
+        st.success(result.message)
+        st.rerun()
+    st.divider()
 
 
 @st.fragment(run_every="5s")
@@ -249,10 +299,6 @@ def _render_detail(client: DashboardApiClient, item: ReviewQueueItem) -> None:
     with agent_review:
         _render_agent_review(item)
     with actions:
-        st.markdown(
-            "\uad00\ub9ac\uc790\ub294 \uc5d0\uc774\uc804\ud2b8 \ud310\ub2e8\uacfc "
-            "\uad00\uacc4\uc5c6\uc774 \uc9c1\uc811 \ucc98\ub9ac\ud560 \uc218 \uc788\uc2b5\ub2c8\ub2e4."
-        )
         st.caption(
             "\uc0c9\uc778\ud558\uba74 RAG\uc5d0 \ubc18\uc601\ub418\uace0, \ubcf5\uad6c\ud558\uba74 "
             "\uc791\uc5c5 \ub514\ub809\ud130\ub9ac\ub97c \uae30\uc900 \ubb38\uc11c \uc0c1\ud0dc\ub85c "

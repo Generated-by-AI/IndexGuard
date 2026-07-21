@@ -100,12 +100,27 @@ class ReviewQueueAction(_StrictView):
     message: str
 
 
+class ReviewHistoryEntry(_StrictView):
+    id: str
+    path: str
+    change_type: str
+    action: str
+    processed_at: str
+    summary: str | None = None
+
+
+class ReviewHistoryRestoreResult(_StrictView):
+    restored_count: int
+    message: str
+
+
 class ReviewQueueUpdate(_StrictView):
     revision: int
     items: list[ReviewQueueItem]
 
 
 _REVIEW_QUEUE_LIST = TypeAdapter(list[ReviewQueueItem])
+_REVIEW_HISTORY_LIST = TypeAdapter(list[ReviewHistoryEntry])
 
 
 class DashboardApiError(RuntimeError):
@@ -266,6 +281,20 @@ class DashboardApiClient:
     def hold_review_queue_item(self, item_id: str) -> ReviewQueueItem:
         payload = self._request_json("POST", f"/api/v2/review-queue/{item_id}/hold")
         return self._validate(ReviewQueueItem, payload)
+
+    def list_review_history(self) -> list[ReviewHistoryEntry]:
+        payload = self._request_json("GET", "/api/v2/review-history")
+        try:
+            return _REVIEW_HISTORY_LIST.validate_python(payload)
+        except ValidationError as exc:
+            raise _invalid_response() from exc
+
+    def restore_review_history(self, history_id: str) -> ReviewHistoryRestoreResult:
+        payload = self._request_json(
+            "POST",
+            f"/api/v2/review-history/{history_id}/restore",
+        )
+        return self._validate(ReviewHistoryRestoreResult, payload)
 
     def _operator_headers(self) -> dict[str, str]:
         if self._operator_token is None:

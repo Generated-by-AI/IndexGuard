@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -101,6 +102,39 @@ def test_unindexed_addition_disappears_when_source_is_deleted(
         pipeline.close()
 
 
+def test_reject_discards_the_latest_unindexed_addition_and_does_not_requeue(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """An operator recovery must remove an addition even after a later edit."""
+
+    monkeypatch.setenv("INDEXGUARD_OPENAI_SUMMARIES", "false")
+    source = tmp_path / "source"
+    source.mkdir()
+    pipeline = AnalysisPipeline(tmp_path / "runtime" / "gateway")
+    queue = DirectoryChangeQueue(
+        directory=source,
+        runtime_dir=tmp_path / "runtime" / "queue",
+        pipeline=pipeline,
+    )
+    try:
+        queue.poll_once()
+        document = source / "draft.md"
+        document.write_text("first candidate\n", encoding="utf-8")
+        first = queue.poll_once()[0]
+        document.write_text("latest candidate\n", encoding="utf-8")
+        latest = queue.poll_once()[0]
+        assert latest.id == first.id
+
+        queue.reject(latest.id)
+
+        assert not document.exists()
+        assert queue.poll_once() == []
+    finally:
+        queue.close()
+        pipeline.close()
+
+
 def test_accepted_document_reverted_to_baseline_leaves_review_queue(
     tmp_path: Path,
     monkeypatch,
@@ -131,6 +165,46 @@ def test_accepted_document_reverted_to_baseline_leaves_review_queue(
 
         document.write_text(baseline, encoding="utf-8")
         assert queue.poll_once() == []
+    finally:
+        queue.close()
+        pipeline.close()
+
+
+def test_history_restore_recovers_stale_scanner_state_and_duplicate_clicks(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("INDEXGUARD_OPENAI_SUMMARIES", "false")
+    source = tmp_path / "source"
+    source.mkdir()
+    pipeline = AnalysisPipeline(tmp_path / "runtime" / "gateway")
+    queue = DirectoryChangeQueue(
+        directory=source,
+        runtime_dir=tmp_path / "runtime" / "queue",
+        pipeline=pipeline,
+    )
+    try:
+        queue.poll_once()
+        document = source / "policy.md"
+        document.write_text("# Policy\nOperational limit: 100\n", encoding="utf-8")
+        item = queue.poll_once()[0]
+        queue.accept(item.id)
+        history_id = queue.list_history()[-1].id
+
+        # A retained runtime may contain a cursor for a former watch root.
+        # Restoring must rebuild that cursor instead of failing after files
+        # and index state have already been changed.
+        queue._scan_state.write_text(
+            json.dumps({"schema_version": 1, "root": "C:/former-root", "files": {}}),
+            encoding="utf-8",
+        )
+        restored = queue.restore_history_before(history_id)
+
+        assert restored.restored_count == 1
+        assert queue.get_item(item.id).path == "policy.md"
+        assert pipeline.indexer.get_current_version("watch:policy.md") is None
+        duplicate = queue.restore_history_before(history_id)
+        assert duplicate.restored_count == 0
     finally:
         queue.close()
         pipeline.close()
