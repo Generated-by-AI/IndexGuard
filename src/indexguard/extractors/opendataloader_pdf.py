@@ -66,8 +66,7 @@ def normalize_pdf_with_opendataloader(
             if not markdown_files:
                 return OpenDataLoaderNormalization(None, "failed", "markdown_output_missing")
             raw_markdown = "\n".join(
-                markdown.read_text(encoding="utf-8", errors="strict")
-                for markdown in markdown_files
+                markdown.read_text(encoding="utf-8", errors="strict") for markdown in markdown_files
             )
     except (OSError, RuntimeError, UnicodeError) as exc:
         return OpenDataLoaderNormalization(None, "failed", type(exc).__name__)
