@@ -33,6 +33,7 @@ indexguard-mcp-http = "indexguard.mcp_server:run_http"
 indexguard-scan = "indexguard.scanner:main"
 indexguard-watch = "indexguard.watcher:main"
 indexguard-watch-git = "indexguard.git_watcher:main"
+indexguard-product-demo = "indexguard.product_pipeline:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

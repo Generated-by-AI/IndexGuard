@@ -86,6 +86,46 @@ class GitDiffEvent:
 GitDiffCallback = Callable[[GitDiffEvent], None]
 
 
+class GitDiffMonitor:
+    """Stateful single-poll adapter shared by the watcher and product pipeline."""
+
+    def __init__(
+        self,
+        repository: str | Path,
+        *,
+        emit_initial: bool = False,
+        max_patch_bytes: int = DEFAULT_MAX_PATCH_BYTES,
+        timeout_seconds: float = DEFAULT_GIT_TIMEOUT_SECONDS,
+    ) -> None:
+        self.repository = repository
+        self.emit_initial = emit_initial
+        self.max_patch_bytes = max_patch_bytes
+        self.timeout_seconds = timeout_seconds
+        self._previous: GitDiffSnapshot | None = None
+
+    def poll(self) -> GitDiffEvent | None:
+        """Capture once and return an event only when the snapshot changed."""
+
+        snapshot = capture_git_diff(
+            self.repository,
+            max_patch_bytes=self.max_patch_bytes,
+            timeout_seconds=self.timeout_seconds,
+        )
+        event_type = _event_type(self._previous, snapshot, emit_initial=self.emit_initial)
+        event = (
+            None
+            if event_type is None
+            else GitDiffEvent(
+                type=event_type,
+                detected_at=datetime.now(UTC).isoformat(timespec="microseconds"),
+                previous_digest=None if self._previous is None else self._previous.digest,
+                snapshot=snapshot,
+            )
+        )
+        self._previous = snapshot
+        return event
+
+
 def capture_git_diff(
     repository: str | Path,
     *,
@@ -204,27 +244,20 @@ def watch_git_diff(
         raise ValueError("max_cycles must be greater than zero")
 
     shutdown = stop_event if stop_event is not None else Event()
-    previous: GitDiffSnapshot | None = None
+    monitor = GitDiffMonitor(
+        repository,
+        emit_initial=emit_initial,
+        max_patch_bytes=max_patch_bytes,
+        timeout_seconds=timeout_seconds,
+    )
     cycles = 0
     while not shutdown.is_set():
-        snapshot = capture_git_diff(
-            repository,
-            max_patch_bytes=max_patch_bytes,
-            timeout_seconds=timeout_seconds,
-        )
         cycles += 1
-        event_type = _event_type(previous, snapshot, emit_initial=emit_initial)
-        if event_type is not None:
-            event = GitDiffEvent(
-                type=event_type,
-                detected_at=datetime.now(UTC).isoformat(timespec="microseconds"),
-                previous_digest=None if previous is None else previous.digest,
-                snapshot=snapshot,
-            )
+        event = monitor.poll()
+        if event is not None:
             if callback is not None:
                 callback(event)
             yield event
-        previous = snapshot
 
         if max_cycles is not None and cycles >= max_cycles:
             return

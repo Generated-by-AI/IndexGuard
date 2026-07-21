@@ -5,8 +5,15 @@ from pathlib import Path
 
 import httpx
 
+from indexguard.contracts import Decision, IndexAction
 from indexguard.git_watcher import GitDiffEvent, GitDiffEventType, GitDiffSnapshot
-from indexguard.openai_compat import OpenAICompatibleClient, OpenAICompatibleSettings
+from indexguard.openai_compat import (
+    OpenAICompatibleClient,
+    OpenAICompatibleRiskAnalyzer,
+    OpenAICompatibleSettings,
+)
+from indexguard.pipeline import AnalysisPipeline
+from tests.fixture_builders import write_pdf
 
 
 def _event() -> GitDiffEvent:
@@ -69,3 +76,48 @@ def test_model_is_discovered_when_not_configured() -> None:
 
     assert client.analyze_agent_task(task="검토", evidence={"diff": "safe"}) == "분석"
     assert paths == ["/v1/models", "/v1/chat/completions"]
+
+
+def test_risk_analyzer_validates_model_policy_and_binds_candidate_sha(tmp_path) -> None:
+    source = write_pdf(tmp_path / "policy.pdf", "Approval limit: 10")
+    with AnalysisPipeline(tmp_path / "runtime") as pipeline:
+        prepared = pipeline.prepare_paths(
+            document_id="policy",
+            baseline_path=source,
+            candidate_path=source,
+        )
+        request = pipeline.operations.get_request(prepared.analysis_id)
+
+        def handler(_request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "message": {
+                                "content": json.dumps(
+                                    {
+                                        "decision": "ALLOW",
+                                        "risk_score": 5,
+                                        "findings": [],
+                                        "index_action": "INDEX",
+                                        "candidate_sha256": request.candidate_sha256,
+                                    }
+                                )
+                            }
+                        }
+                    ]
+                },
+            )
+
+        analyzer = OpenAICompatibleRiskAnalyzer(
+            OpenAICompatibleClient(
+                OpenAICompatibleSettings(base_url="http://model.test/v1", model="demo"),
+                transport=httpx.MockTransport(handler),
+            )
+        )
+        submission = analyzer.analyze(request)
+
+    assert submission.request_id == request.request_id
+    assert submission.policy.decision is Decision.ALLOW
+    assert submission.policy.index_action is IndexAction.INDEX

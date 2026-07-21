@@ -32,6 +32,11 @@ from indexguard.errors import (
     IndexGuardError,
     ServiceConfigurationError,
 )
+from indexguard.openai_compat import (
+    OpenAICompatibleClient,
+    OpenAICompatibleRiskAnalyzer,
+    OpenAICompatibleSettings,
+)
 from indexguard.operations import RiskAnalyzer
 from indexguard.pipeline import AnalysisPipeline
 from indexguard.risk_client import HttpRiskAnalyzer
@@ -319,14 +324,22 @@ def _require_any_token(
 
 def _risk_analyzer_from_environment() -> RiskAnalyzer | None:
     endpoint = os.getenv("INDEXGUARD_B_ANALYZE_URL")
-    if not endpoint:
-        return None
-    timeout = float(os.getenv("INDEXGUARD_B_TIMEOUT_SECONDS", "15"))
-    return HttpRiskAnalyzer(
-        endpoint,
-        token=os.getenv("INDEXGUARD_B_OUTBOUND_TOKEN"),
-        timeout=timeout,
-    )
+    if endpoint:
+        timeout = float(os.getenv("INDEXGUARD_B_TIMEOUT_SECONDS", "15"))
+        return HttpRiskAnalyzer(
+            endpoint,
+            token=os.getenv("INDEXGUARD_B_OUTBOUND_TOKEN"),
+            timeout=timeout,
+        )
+    if os.getenv("INDEXGUARD_OPENAI_RISK_ENABLED", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }:
+        return OpenAICompatibleRiskAnalyzer(
+            OpenAICompatibleClient(OpenAICompatibleSettings.from_environment())
+        )
+    return None
 
 
 app = create_app()
