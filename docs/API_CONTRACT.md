@@ -87,6 +87,22 @@ X-IndexGuard-Operator-Token: ...
 
 필요 환경 변수는 `INDEXGUARD_B_ANALYZE_URL`, 선택적인 `INDEXGUARD_B_OUTBOUND_TOKEN`, `INDEXGUARD_B_TIMEOUT_SECONDS`입니다. B adapter는 redirect를 따르지 않으며 timeout은 최대 60초입니다.
 
+저장소에 포함된 독립 B 서비스는 `uv run indexguard-risk-api`로 실행하며 기본 주소는
+`http://127.0.0.1:9000`입니다.
+
+```http
+POST /analyze
+Authorization: Bearer ${INDEXGUARD_B_SERVICE_TOKEN}
+Content-Type: application/json
+```
+
+요청은 위의 `RiskAnalysisRequest`, 응답은 아래의 `PolicySubmission` 계약을 그대로 사용합니다.
+`INDEXGUARD_B_SERVICE_TOKEN`은 A의 `INDEXGUARD_B_OUTBOUND_TOKEN`과 같은 값이어야 합니다. B는
+Diff와 요청의 baseline/candidate SHA가 다르면 `FAILED + BLOCK + QUARANTINE`을 반환합니다.
+정적 규칙은 항상 실행되며 `INDEXGUARD_B_LLM_ENABLED=true`일 때만 OpenAI 호환 로컬 모델을
+1차 문맥 판정과 고위험 2차 감사에 사용합니다. LLM은 decision과 index action을 직접 만들지 못하고
+정적 hard-block 또는 더 높은 위험 점수를 낮출 수 없습니다.
+
 ## 4. B → A 정책 제출
 
 ```http
