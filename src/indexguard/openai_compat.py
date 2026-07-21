@@ -208,7 +208,7 @@ class OpenAICompatibleClient:
         except httpx.HTTPError as exc:
             raise ExternalServiceError(
                 "OpenAI-compatible analysis request failed",
-                retryable=True,
+                retryable=_http_error_is_retryable(exc),
             ) from exc
 
         if len(response.content) > _MAX_RESPONSE_BYTES:
@@ -263,6 +263,13 @@ class OpenAICompatibleClient:
         raise ServiceConfigurationError(
             "OpenAI-compatible /models response contains no usable model"
         )
+
+
+def _http_error_is_retryable(error: httpx.HTTPError) -> bool:
+    if not isinstance(error, httpx.HTTPStatusError):
+        return True
+    status_code = error.response.status_code
+    return status_code in {408, 409, 425, 429} or status_code >= 500
 
 
 def _json_content(value: Mapping[str, Any]) -> str:

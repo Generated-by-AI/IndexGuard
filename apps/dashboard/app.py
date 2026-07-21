@@ -569,7 +569,7 @@ def _render_actions(
 
 
 def _render_retrieval(client: DashboardApiClient, analysis: PreparedAnalysis) -> None:
-    state_key = f"rag_chat_{analysis.document_id}"
+    state_key, question_key, clear_question_key = _rag_state_keys(analysis.document_id)
     session_state = cast(MutableMapping[str, object], st.session_state)
     try:
         current_index = client.get_current_index(analysis.document_id)
@@ -598,7 +598,7 @@ def _render_retrieval(client: DashboardApiClient, analysis: PreparedAnalysis) ->
     with controls:
         if exchanges and st.button(
             "Clear conversation",
-            key=f"clear_{state_key}",
+            key=f"rag_chat:clear-conversation:{analysis.document_id}",
             width="stretch",
         ):
             st.session_state.pop(state_key, None)
@@ -618,12 +618,15 @@ def _render_retrieval(client: DashboardApiClient, analysis: PreparedAnalysis) ->
         "Submitting sends your question, same-version conversation context, and retrieved "
         "chunks to the configured model endpoint. Source labels are not semantic verification."
     )
-    with st.form(f"rag_chat_form_{analysis.document_id}", clear_on_submit=True):
+    if session_state.pop(clear_question_key, False):
+        session_state[question_key] = ""
+    with st.form(f"rag_chat:form:{analysis.document_id}", clear_on_submit=False):
         question = st.text_area(
             "Question for approved evidence",
             placeholder="승인 한도와 필요한 사전 승인 절차는 무엇인가요?",
             max_chars=2_000,
             height=88,
+            key=question_key,
         )
         submitted = st.form_submit_button("Ask indexed evidence", type="primary")
     if submitted:
@@ -648,6 +651,7 @@ def _render_retrieval(client: DashboardApiClient, analysis: PreparedAnalysis) ->
                 st.error(f"Answer generation is unavailable: {exc.message} [{exc.code}].{retry}")
             else:
                 append_exchange(session_state, state_key, exchange)
+                session_state[clear_question_key] = True
                 st.rerun()
 
     with st.expander("Inspect raw protected retrieval"):
@@ -731,6 +735,14 @@ def _current_search_result(
     if result.document_id != expected_document_id or result.current_sha256 != current_sha256:
         return None
     return result
+
+
+def _rag_state_keys(document_id: str) -> tuple[str, str, str]:
+    return (
+        f"rag_chat:conversation:{document_id}",
+        f"rag_chat:question:{document_id}",
+        f"rag_chat:clear-after-success:{document_id}",
+    )
 
 
 def _detail_header(analysis: PreparedAnalysis, status: AnalysisStatusView) -> str:

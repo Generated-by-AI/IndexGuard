@@ -189,3 +189,58 @@ def test_oversized_completion_response_is_rejected() -> None:
 
     with pytest.raises(ExternalServiceError, match="oversized"):
         client.analyze_agent_task(task="review", evidence={})
+
+
+@pytest.mark.parametrize(
+    ("status_code", "retryable"),
+    [
+        (400, False),
+        (401, False),
+        (403, False),
+        (404, False),
+        (422, False),
+        (408, True),
+        (409, True),
+        (425, True),
+        (429, True),
+        (500, True),
+        (503, True),
+    ],
+)
+def test_chat_completion_http_status_retryability(
+    status_code: int,
+    retryable: bool,
+) -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status_code, json={"error": "failure"})
+
+    client = OpenAICompatibleClient(
+        OpenAICompatibleSettings(
+            base_url="http://127.0.0.1:9001/v1",
+            model="risk-model",
+        ),
+        transport=httpx.MockTransport(handler),
+    )
+
+    with pytest.raises(ExternalServiceError) as caught:
+        client.analyze_agent_task(task="review", evidence={})
+
+    assert caught.value.retryable is retryable
+
+
+def test_chat_completion_transport_failure_is_retryable() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("offline", request=request)
+
+    client = OpenAICompatibleClient(
+        OpenAICompatibleSettings(
+            base_url="http://127.0.0.1:9001/v1",
+            model="risk-model",
+        ),
+        transport=httpx.MockTransport(handler),
+    )
+
+    with pytest.raises(ExternalServiceError) as caught:
+        client.analyze_agent_task(task="review", evidence={})
+
+    assert caught.value.retryable is True

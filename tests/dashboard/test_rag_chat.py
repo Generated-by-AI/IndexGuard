@@ -197,7 +197,20 @@ def test_only_current_index_exchanges_remain_visible() -> None:
     assert hidden == 1
 
 
-@pytest.mark.parametrize("answer", ["출처 없는 답변", "잘못된 출처 [S9]"])
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "출처 없는 답변",
+        "잘못된 출처 [S9]",
+        "유효 [S1]; 변조 [S2x]",
+        "유효 [S1]; 별칭 [S01]",
+        "유효 [S1]; 발명 [Sfoo]",
+        "유효 [S1]; 닫히지 않은 [S2",
+        "유효 [S1]; 공백 [ S9 ]",
+        "유효 [S1]; 후행 공백 [S9 ]",
+        "유효 [S1]; 선행 공백 [ S9]",
+    ],
+)
 def test_generated_answer_must_reference_only_returned_source_labels(answer: str) -> None:
     client = _SearchClient(_response(results=[_hit()]))
 
@@ -225,6 +238,22 @@ def test_source_label_does_not_claim_semantic_support() -> None:
     assert exchange.generated is True
     assert exchange.citations == [_hit()]
     assert "모순" in exchange.answer
+
+
+def test_too_many_returned_sources_fail_closed_before_model_call() -> None:
+    client = _SearchClient(_response(results=[_hit(chunk_index=index) for index in range(9)]))
+    answerer = _Answerer()
+
+    with pytest.raises(DashboardApiError, match="inconsistent source identities"):
+        answer_from_protected_index(
+            client,
+            answerer,
+            question="질문",
+            document_id="expense-policy",
+            previous_exchanges=[],
+        )
+
+    assert answerer.calls == []
 
 
 def test_append_exchange_keeps_a_bounded_serializable_session_ledger() -> None:

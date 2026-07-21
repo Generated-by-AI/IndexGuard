@@ -20,6 +20,9 @@ from indexguard.errors import ExternalServiceError
 _NO_EVIDENCE_ANSWER = (
     "No current approved indexed evidence matched this question. No model was called."
 )
+_MAX_RAG_SOURCES = 8
+_CANONICAL_SOURCE_LABEL = re.compile(r"\[S([1-9]\d*)\]")
+_SOURCE_LIKE_TOKEN = re.compile(r"\[\s*s", re.IGNORECASE)
 
 
 class _StrictModel(BaseModel):
@@ -30,7 +33,7 @@ class RagExchange(_StrictModel):
     question: str = Field(min_length=1, max_length=2_000)
     answer: str = Field(min_length=1, max_length=64_000)
     index_sha256: str | None = Field(pattern=r"^[0-9a-f]{64}$")
-    citations: list[SearchHit] = Field(max_length=8)
+    citations: list[SearchHit] = Field(max_length=_MAX_RAG_SOURCES)
     generated: bool
 
 
@@ -90,6 +93,9 @@ def answer_from_protected_index(
         _require_unchanged_index(client, document_id, result.current_sha256)
         return exchange
 
+    if len(result.results) > _MAX_RAG_SOURCES:
+        raise _invalid_response()
+
     if any(hit.document_id != document_id for hit in result.results):
         raise _invalid_response()
     active_shas = {hit.sha256 for hit in result.results}
@@ -130,13 +136,16 @@ def answer_from_protected_index(
         history=history,
         evidence=evidence,
     )
-    markers = {int(value) for value in re.findall(r"\[S(\d+)\]", answer)}
+    label_values = _CANONICAL_SOURCE_LABEL.findall(answer)
+    remainder = _CANONICAL_SOURCE_LABEL.sub("", answer)
+    if _SOURCE_LIKE_TOKEN.search(remainder) or any(
+        len(value) > len(str(len(result.results))) for value in label_values
+    ):
+        raise _invalid_source_labels()
+    markers = {int(value) for value in label_values}
     allowed_markers = set(range(1, len(result.results) + 1))
     if not markers or not markers.issubset(allowed_markers):
-        raise ExternalServiceError(
-            "generated answer did not preserve valid source labels",
-            retryable=False,
-        )
+        raise _invalid_source_labels()
     exchange = RagExchange(
         question=normalized_question,
         answer=answer,
@@ -183,6 +192,13 @@ def _invalid_response() -> DashboardApiError:
     return DashboardApiError(
         code="INVALID_GATEWAY_RESPONSE",
         message="Protected retrieval returned inconsistent source identities.",
+        retryable=False,
+    )
+
+
+def _invalid_source_labels() -> ExternalServiceError:
+    return ExternalServiceError(
+        "generated answer did not preserve valid source labels",
         retryable=False,
     )
 

@@ -19,6 +19,7 @@ from apps.dashboard.app import (
     _current_search_result,
     _fetch_verified_replacement,
     _finalize_command_navigation,
+    _rag_state_keys,
 )
 from indexguard.contracts import AnalysisStatusView, PreparedAnalysis
 
@@ -282,6 +283,19 @@ def test_cached_raw_search_must_match_live_document_and_current_sha() -> None:
     assert stale is None
 
 
+def test_rag_state_namespaces_isolate_collision_shaped_document_ids() -> None:
+    x_keys = _rag_state_keys("X")
+    collision_keys = _rag_state_keys("question_X")
+
+    assert len({*x_keys, *collision_keys}) == 6
+    state: dict[str, object] = {
+        x_keys[1]: "draft for X",
+        collision_keys[0]: [{"question": "ledger for question_X"}],
+    }
+    assert state[x_keys[1]] == "draft for X"
+    assert state[collision_keys[0]] == [{"question": "ledger for question_X"}]
+
+
 class _RequestedGatewayHandler(_EmptyGatewayHandler):
     def do_GET(self) -> None:  # noqa: N802 - stdlib callback name
         if self.path.startswith("/api/v1/analyses?"):
@@ -372,6 +386,25 @@ class _RagGatewayHandler(_EmptyGatewayHandler):
         self._json(404, {"error": {"code": "NOT_FOUND", "message": "not found"}})
 
 
+class _FlakyRagGatewayHandler(_RagGatewayHandler):
+    model_calls = 0
+
+    def do_POST(self) -> None:  # noqa: N802 - stdlib callback name
+        if self.path != "/v1/chat/completions":
+            self._json(404, {"error": {"code": "NOT_FOUND", "message": "not found"}})
+            return
+        content_length = int(self.headers.get("Content-Length", "0"))
+        self.rfile.read(content_length)
+        type(self).model_calls += 1
+        if type(self).model_calls == 1:
+            self._json(503, {"error": {"message": "temporary model outage"}})
+            return
+        self._json(
+            200,
+            {"choices": [{"message": {"content": "부서장 전결 한도는 1억 원입니다 [S1]."}}]},
+        )
+
+
 @contextmanager
 def _empty_gateway():
     server = ThreadingHTTPServer(("127.0.0.1", 0), _EmptyGatewayHandler)
@@ -416,6 +449,20 @@ def _authority_mismatch_gateway():
 def _rag_gateway():
     _RagGatewayHandler.model_calls = 0
     server = ThreadingHTTPServer(("127.0.0.1", 0), _RagGatewayHandler)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+@contextmanager
+def _flaky_rag_gateway():
+    _FlakyRagGatewayHandler.model_calls = 0
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _FlakyRagGatewayHandler)
     thread = Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -506,11 +553,52 @@ def test_app_runs_protected_rag_question_into_source_ledger(monkeypatch) -> None
 
     assert not app.exception
     assert _RagGatewayHandler.model_calls == 1
-    stored = app.session_state["rag_chat_구매승인-한도-조정안"]
+    conversation_key = _rag_state_keys("구매승인-한도-조정안")[0]
+    stored = app.session_state[conversation_key]
     assert stored[0]["question"] == "전결 한도는 얼마인가요?"
     assert stored[0]["answer"] == "부서장 전결 한도는 1억 원입니다 [S1]."
     assert stored[0]["index_sha256"] == "b" * 64
     assert stored[0]["citations"][0]["score"] == 4.0
+
+
+def test_app_preserves_failed_rag_question_for_retry_then_clears_on_success(
+    monkeypatch,
+) -> None:
+    question_text = "전결 한도는 얼마인가요?"
+    conversation_key = _rag_state_keys("구매승인-한도-조정안")[0]
+    with _flaky_rag_gateway() as api_url:
+        monkeypatch.setenv("INDEXGUARD_API_URL", api_url)
+        monkeypatch.setenv("INDEXGUARD_OPERATOR_TOKEN", "test-operator-token")
+        monkeypatch.setenv("INDEXGUARD_OPENAI_BASE_URL", f"{api_url}/v1")
+        monkeypatch.setenv("INDEXGUARD_OPENAI_MODEL", "demo-model")
+        app = AppTest.from_file(str(_APP), default_timeout=10)
+        app.session_state["selected_analysis_id"] = "anl_demo"
+        app.run()
+        question = next(
+            item for item in app.text_area if item.label == "Question for approved evidence"
+        )
+        question.input(question_text)
+        next(button for button in app.button if button.label == "Ask indexed evidence").click()
+        app.run()
+
+        failed_question = next(
+            item for item in app.text_area if item.label == "Question for approved evidence"
+        )
+        assert failed_question.value == question_text
+        assert any("Answer generation is unavailable" in message.value for message in app.error)
+        assert conversation_key not in app.session_state
+
+        next(button for button in app.button if button.label == "Ask indexed evidence").click()
+        app.run()
+
+    assert not app.exception
+    assert _FlakyRagGatewayHandler.model_calls == 2
+    stored = app.session_state[conversation_key]
+    assert stored[0]["question"] == question_text
+    cleared_question = next(
+        item for item in app.text_area if item.label == "Question for approved evidence"
+    )
+    assert cleared_question.value == ""
 
 
 def test_app_does_not_open_an_implicit_first_queue_row(monkeypatch) -> None:
