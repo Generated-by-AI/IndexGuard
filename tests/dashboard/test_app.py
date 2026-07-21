@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from contextlib import contextmanager
+from copy import deepcopy
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Thread
@@ -12,7 +13,12 @@ pytest.importorskip("streamlit", reason="dashboard extra is not installed")
 from streamlit.testing.v1 import AppTest
 
 from apps.dashboard.api_client import DashboardApiError
-from apps.dashboard.app import _command_failure_is_definitive
+from apps.dashboard.app import (
+    _command_failure_is_definitive,
+    _fetch_verified_replacement,
+    _finalize_command_navigation,
+)
+from indexguard.contracts import AnalysisStatusView, PreparedAnalysis
 
 _APP = Path(__file__).parents[2] / "apps" / "dashboard" / "app.py"
 
@@ -101,6 +107,121 @@ _REQUESTED_ANALYSIS = {
     "analysis_attempt": 1,
     "supersedes_analysis_id": None,
 }
+
+
+class _ReplacementClient:
+    def __init__(
+        self,
+        *,
+        supersedes_analysis_id: str = "anl_demo",
+        payload_analysis_id: str = "anl_replacement",
+    ) -> None:
+        self.status_payload = deepcopy(_REQUESTED_STATUS)
+        self.status_payload.update(
+            {
+                "analysis_id": payload_analysis_id,
+                "attempt": 2,
+                "state": "ANALYSIS_REQUESTED",
+                "supersedes_analysis_id": supersedes_analysis_id,
+            }
+        )
+        self.analysis_payload = deepcopy(_REQUESTED_ANALYSIS)
+        self.analysis_payload.update(
+            {
+                "analysis_id": payload_analysis_id,
+                "analysis_attempt": 2,
+                "supersedes_analysis_id": supersedes_analysis_id,
+            }
+        )
+
+    def get_status(self, analysis_id: str) -> AnalysisStatusView:
+        assert analysis_id == "anl_replacement"
+        return AnalysisStatusView.model_validate(self.status_payload)
+
+    def get_analysis(self, analysis_id: str) -> PreparedAnalysis:
+        assert analysis_id == "anl_replacement"
+        return PreparedAnalysis.model_validate(self.analysis_payload)
+
+
+def test_reanalysis_navigation_requires_verified_replacement_lineage() -> None:
+    original = PreparedAnalysis.model_validate(_REQUESTED_ANALYSIS)
+
+    assert (
+        _fetch_verified_replacement(_ReplacementClient(), original, "anl_replacement").analysis_id
+        == "anl_replacement"
+    )
+
+    with pytest.raises(DashboardApiError) as caught:
+        _fetch_verified_replacement(
+            _ReplacementClient(supersedes_analysis_id="anl_unrelated"),
+            original,
+            "anl_replacement",
+        )
+
+    assert caught.value.code == "INVALID_GATEWAY_RESPONSE"
+
+    with pytest.raises(DashboardApiError) as caught:
+        _fetch_verified_replacement(
+            _ReplacementClient(payload_analysis_id="anl_unrelated"),
+            original,
+            "anl_replacement",
+        )
+
+    assert caught.value.code == "INVALID_GATEWAY_RESPONSE"
+
+
+def test_command_navigation_mutates_session_only_after_replacement_verification() -> None:
+    original = PreparedAnalysis.model_validate(_REQUESTED_ANALYSIS)
+    slot = "command_idempotency_anl_demo"
+    session: dict[str, object] = {
+        "selected_analysis_id": "anl_demo",
+        slot: "stable-idempotency-key",
+    }
+
+    replacement = _finalize_command_navigation(
+        _ReplacementClient(),
+        original,
+        "anl_replacement",
+        session,
+        slot,
+    )
+
+    assert replacement is not None and replacement.analysis_id == "anl_replacement"
+    assert session == {"selected_analysis_id": "anl_replacement"}
+
+    unresolved_session: dict[str, object] = {
+        "selected_analysis_id": "anl_demo",
+        slot: "stable-idempotency-key",
+    }
+    with pytest.raises(DashboardApiError):
+        _finalize_command_navigation(
+            _ReplacementClient(payload_analysis_id="anl_unrelated"),
+            original,
+            "anl_replacement",
+            unresolved_session,
+            slot,
+        )
+
+    assert unresolved_session == {
+        "selected_analysis_id": "anl_demo",
+        slot: "stable-idempotency-key",
+    }
+
+    nonreplacement_session: dict[str, object] = {
+        "selected_analysis_id": "anl_demo",
+        slot: "stable-idempotency-key",
+    }
+    assert (
+        _finalize_command_navigation(
+            _ReplacementClient(),
+            original,
+            None,
+            nonreplacement_session,
+            slot,
+        )
+        is None
+    )
+    assert nonreplacement_session == {"selected_analysis_id": "anl_demo"}
 
 
 class _RequestedGatewayHandler(_EmptyGatewayHandler):

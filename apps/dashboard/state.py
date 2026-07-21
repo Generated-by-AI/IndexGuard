@@ -256,6 +256,43 @@ def authority_issues(
     return issues
 
 
+def replacement_authority_issues(
+    original: PreparedAnalysis,
+    replacement_status: AnalysisStatusView,
+    replacement: PreparedAnalysis,
+    *,
+    expected_analysis_id: str,
+) -> list[AuthorityIssue]:
+    """Verify that a reanalysis result continues one exact evidence lineage."""
+
+    issues = authority_issues(replacement_status, replacement)
+    lineage_mismatch = (
+        replacement.analysis_id != expected_analysis_id
+        or replacement_status.analysis_id != expected_analysis_id
+        or replacement.analysis_id == original.analysis_id
+        or replacement.document_id != original.document_id
+        or replacement.version != original.version
+        or replacement.analysis_attempt != original.analysis_attempt + 1
+        or replacement.supersedes_analysis_id != original.analysis_id
+        or replacement_status.supersedes_analysis_id != original.analysis_id
+        or replacement.baseline.sha256 != original.baseline.sha256
+        or replacement.candidate.sha256 != original.candidate.sha256
+    )
+    if lineage_mismatch:
+        issues.append(
+            AuthorityIssue(
+                code="REPLACEMENT_LINEAGE_MISMATCH",
+                message=(
+                    "The reanalysis replacement does not continue the selected document, "
+                    "version, evidence hashes, attempt, and supersession lineage. Keep the "
+                    "original analysis selected."
+                ),
+                critical=True,
+            )
+        )
+    return issues
+
+
 def effective_commands(
     status: AnalysisStatusView,
     analysis: PreparedAnalysis,

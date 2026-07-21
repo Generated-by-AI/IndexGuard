@@ -300,6 +300,7 @@ def _command_result_matches(
     if command.action is OperatorAction.REANALYZE:
         replacement_is_valid = (
             result.replacement_analysis_id is not None
+            and bool(result.replacement_analysis_id.strip())
             and result.replacement_analysis_id != analysis_id
             and status.state is WorkflowState.SUPERSEDED
         )
