@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=75", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "indexguard"
+version = "0.1.0"
+description = "Fail-closed document integrity and RAG indexing gateway"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "defusedxml>=0.7.1,<1",
+  "fastapi>=0.115,<1",
+  "pydantic>=2.10,<3",
+  "pymupdf>=1.25,<2",
+  "python-multipart>=0.0.20,<1",
+  "uvicorn>=0.34,<1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "httpx>=0.28,<1",
+  "pytest>=8,<10",
+  "ruff>=0.11,<1",
+]
+
+[project.scripts]
+indexguard-api = "indexguard.api:run"
+indexguard-scan = "indexguard.scanner:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]

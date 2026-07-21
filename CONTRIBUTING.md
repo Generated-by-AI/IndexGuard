@@ -35,9 +35,9 @@ Conventional Commits의 최소 접두사만 사용합니다.
 
 ## 디렉터리 소유권
 
-- 기술 리드: `src/indexguard/extractors`, `detectors`, `decision.py`, `apps/api`, 핵심 테스트
+- A 문서 게이트웨이: `src/indexguard/extractors`, `detectors/document_diff.py`, `rag/gate.py`, `apps/api`, 핵심 테스트
 - 제품·기획 리드: `apps/dashboard`, 배포, `README.md`, 발표·제출 문서
-- AI·레드팀 리드: `src/indexguard/llm`, `tests/fixtures`, `data`, 평가 스크립트
+- AI·레드팀 리드: `src/indexguard/llm`, 위험 탐지기, `tests/fixtures`, `data`, 평가 스크립트
 - 공동 잠금: `contracts.py`, `docs/API_CONTRACT.md`
 
 GitHub 계정명이 확정되면 이 규칙을 `.github/CODEOWNERS`로 옮깁니다. 임의의 계정명을 넣어 두지는 않습니다.
