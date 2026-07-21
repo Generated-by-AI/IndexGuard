@@ -109,7 +109,7 @@ def test_directory_assessment_requires_and_parses_one_json_object() -> None:
                         "message": {
                             "content": json.dumps(
                                 {
-                                    "summary": "\ubb38\uc7a5 \ud55c \uacf3\uc758 \ud45c\ud604\uc744 \uc815\ub9ac\ud588\uc2b5\ub2c8\ub2e4.",
+                                    "summary": "문장 한 곳의 표현을 정리했습니다.",
                                     "review_required": False,
                                     "review_reason": "",
                                 }
@@ -140,6 +140,8 @@ def test_directory_assessment_requires_and_parses_one_json_object() -> None:
     assert "particles, punctuation" in system_prompt
     assert "person's or entity's name" in system_prompt
     assert "number/value" in system_prompt
+    assert "material attribute, category, relationship, obligation, or unit" in system_prompt
+    assert "monthly salary becoming daily salary" in system_prompt
 
 
 def test_model_is_discovered_when_not_configured() -> None:

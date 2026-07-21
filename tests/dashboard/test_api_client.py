@@ -552,3 +552,46 @@ def test_network_and_schema_failures_remain_unknown_not_safe() -> None:
         _client(malformed).list_analyses()
     assert schema_error.value.code == "INVALID_GATEWAY_RESPONSE"
     assert schema_error.value.retryable is False
+
+
+def test_protected_index_reads_preserve_identity_and_operator_authority() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == "/api/v1/index/search":
+            return httpx.Response(
+                200,
+                json={
+                    "query": "승인 한도",
+                    "document_id": "expense-policy",
+                    "current_sha256": CANDIDATE_SHA,
+                    "results": [
+                        {
+                            "document_id": "expense-policy",
+                            "sha256": CANDIDATE_SHA,
+                            "chunk_index": 0,
+                            "text": "승인 한도는 1억 원이다.",
+                            "score": 4.0,
+                        }
+                    ],
+                },
+            )
+        return httpx.Response(
+            200,
+            json={"document_id": "expense-policy", "sha256": CANDIDATE_SHA},
+        )
+
+    client = _client(handler)
+    search = client.search("승인 한도", document_id="expense-policy")
+    current = client.get_current_index("expense-policy")
+
+    assert search.current_sha256 == CANDIDATE_SHA
+    assert search.results[0].score == 4.0
+    assert current.sha256 == CANDIDATE_SHA
+    assert [request.headers["X-IndexGuard-Operator-Token"] for request in requests] == [
+        "operator-secret",
+        "operator-secret",
+    ]
+    assert requests[0].url.params["document_id"] == "expense-policy"
+    assert requests[1].url.params["document_id"] == "expense-policy"

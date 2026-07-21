@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from indexguard.api import create_app
@@ -16,6 +17,15 @@ class _MinorEditModel:
             summary="\ub2e8\uc21c\ud55c \ud45c\ud604\uc744 \uc218\uc815\ud588\uc2b5\ub2c8\ub2e4.",
             review_required=False,
             review_reason="",
+        )
+
+
+class _OvercautiousModel:
+    def assess_directory_change(self, **_kwargs) -> DirectoryChangeAssessment:
+        return DirectoryChangeAssessment(
+            summary="모든 변경을 검토 대상으로 분류했습니다.",
+            review_required=True,
+            review_reason="보수적 검토",
         )
 
 
@@ -232,7 +242,10 @@ def test_model_cleared_edit_waits_for_cancellation_before_auto_indexing(
         queue._analyze_later(changed.id, changed.candidate_sha256)
         waiting = queue.get_item(changed.id)
 
-        assert waiting.summary == "\ub2e8\uc21c\ud55c \ud45c\ud604\uc744 \uc218\uc815\ud588\uc2b5\ub2c8\ub2e4."
+        assert (
+            waiting.summary
+            == "\ub2e8\uc21c\ud55c \ud45c\ud604\uc744 \uc218\uc815\ud588\uc2b5\ub2c8\ub2e4."
+        )
         assert waiting.review_required is False
         assert waiting.auto_processing is True
         assert waiting.auto_process_at is not None
@@ -274,6 +287,62 @@ def test_model_cleared_edit_is_indexed_after_the_auto_window(
 
         assert queue.poll_once() == []
         assert pipeline.indexer.get_current_version("watch:memo.md") is not None
+    finally:
+        queue.close()
+        pipeline.close()
+
+
+@pytest.mark.parametrize(
+    ("candidate", "expected_review", "reason_fragment"),
+    [
+        ("김지훈의 월급 2000000원\n", False, None),
+        ("김지훈 월급 20000000원\n", True, "숫자 또는 값"),
+        ("김지훈 일급 2000000원\n", True, "기준 단위 또는 속성"),
+        ("김철수 월급 2000000원\n", True, "대상 인물"),
+    ],
+)
+def test_salary_demo_distinguishes_surface_and_material_fact_changes(
+    tmp_path: Path,
+    monkeypatch,
+    candidate: str,
+    expected_review: bool,
+    reason_fragment: str | None,
+) -> None:
+    monkeypatch.setenv("INDEXGUARD_OPENAI_SUMMARIES", "false")
+    source = tmp_path / "source"
+    source.mkdir()
+    pipeline = AnalysisPipeline(tmp_path / "runtime" / "gateway")
+    queue = DirectoryChangeQueue(
+        directory=source,
+        runtime_dir=tmp_path / "runtime" / "queue",
+        pipeline=pipeline,
+    )
+    monkeypatch.setattr(queue._executor, "submit", lambda *_args, **_kwargs: None)
+    try:
+        queue.poll_once()
+        document = source / "salary.md"
+        document.write_text("김지훈 월급 2000000원\n", encoding="utf-8")
+        queue.accept(queue.poll_once()[0].id)
+
+        # The deterministic surface-equivalence guard must keep the harmless
+        # particle change out of review even if a model is overcautious. The
+        # material cases use a permissive model so the local safety override
+        # itself must identify the changed fact.
+        queue._model = (  # type: ignore[assignment]
+            _OvercautiousModel() if not expected_review else _MinorEditModel()
+        )
+        document.write_text(candidate, encoding="utf-8")
+        item = queue.poll_once()[0]
+        queue._analyze_later(item.id, item.candidate_sha256)
+        analyzed = queue.get_item(item.id)
+
+        assert analyzed.review_required is expected_review
+        if reason_fragment is None:
+            assert analyzed.review_reason == ""
+            assert analyzed.auto_processing is True
+        else:
+            assert reason_fragment in (analyzed.review_reason or "")
+            assert analyzed.auto_processing is False
     finally:
         queue.close()
         pipeline.close()

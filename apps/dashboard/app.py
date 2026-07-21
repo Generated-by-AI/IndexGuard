@@ -5,21 +5,38 @@ from __future__ import annotations
 import threading
 from html import escape
 from pathlib import Path
+from typing import Protocol
 
 import streamlit as st
 
-# ``streamlit run apps/dashboard/app.py`` executes this file as a script,
-# while tests import it as ``apps.dashboard.app``.  Keep both supported so
-# ordinary dashboard startup cannot fail with ``No module named 'apps'``.
-if __package__:
+# ``streamlit run`` and ``AppTest`` disagree about ``__package__``.  Prefer
+# the repository package path whenever it is importable, then fall back to
+# sibling imports for direct execution from ``apps/dashboard``.
+try:
     from apps.dashboard.api_client import DashboardApiClient, DashboardApiError, ReviewQueueItem
-else:
+    from apps.dashboard.state import replacement_authority_issues
+except ModuleNotFoundError:
     from api_client import DashboardApiClient, DashboardApiError, ReviewQueueItem
+    from state import replacement_authority_issues
+
+from indexguard.contracts import AnalysisStatusView, PreparedAnalysis
 
 _CSS_PATH = Path(__file__).parent / "assets" / "indexguard.css"
 _REQUESTED = "\uc694\uccad\ub428"
 _ADDED = "\ucd94\uac00"
 _DELETED = "\uc0ad\uc81c"
+
+
+class _AnalysisReader(Protocol):
+    def get_status(self, analysis_id: str) -> AnalysisStatusView: ...
+
+    def get_analysis(self, analysis_id: str) -> PreparedAnalysis: ...
+
+
+class _SessionState(Protocol):
+    def __delitem__(self, key: str) -> None: ...
+
+    def __setitem__(self, key: str, value: object) -> None: ...
 
 
 class _QueueSubscriber:
@@ -28,9 +45,13 @@ class _QueueSubscriber:
     def __init__(self, base_url: str) -> None:
         self._client = DashboardApiClient(base_url)
         self._lock = threading.RLock()
-        self._items: list[ReviewQueueItem] = []
+        try:
+            self._items = self._client.list_review_queue()
+            self._error: DashboardApiError | None = None
+        except DashboardApiError as exc:
+            self._items = []
+            self._error = exc
         self._revision = -1
-        self._error: DashboardApiError | None = None
         self._thread = threading.Thread(
             target=self._listen,
             daemon=True,
@@ -54,9 +75,12 @@ class _QueueSubscriber:
                 threading.Event().wait(2)
                 continue
             with self._lock:
+                revision_changed = update.revision != self._revision
                 self._items = update.items
                 self._revision = update.revision
                 self._error = None
+            if not revision_changed:
+                threading.Event().wait(0.2)
 
 
 @st.cache_resource(show_spinner=False)
@@ -80,10 +104,7 @@ def main() -> None:
     try:
         health = client.health()
     except DashboardApiError as exc:
-        st.error(
-            f"\uac8c\uc774\ud2b8\uc6e8\uc774\uc5d0 \uc5f0\uacb0\ud560 \uc218 \uc5c6\uc2b5\ub2c8\ub2e4: "
-            f"{exc.message} [{exc.code}]"
-        )
+        st.error(f"게이트웨이에 연결할 수 없습니다: {exc.message} [{exc.code}]")
         return
     _render_masthead(client.base_url, health.service, health.status)
     _live_workspace(client)
@@ -93,10 +114,10 @@ def _render_masthead(base_url: str, service: str, status: str) -> None:
     st.html(
         '<header class="ig-masthead">'
         '<h1 class="ig-brand">IndexGuard</h1>'
-        '<div class="ig-route">\uac10\uc2dc \ub514\ub809\ud130\ub9ac \ubcc0\uacbd \uac80\ud1a0 \ubc0f RAG \uc0c9\uc778 \uad00\ub9ac</div>'
+        '<div class="ig-route">감시 디렉터리 변경 검토 및 RAG 색인 관리</div>'
         '<div class="ig-gateway">'
         '<span class="ig-gateway-dot ig-tone-allow" aria-hidden="true"></span>'
-        f'<span>{escape(service)} · {escape(status)} · {escape(base_url)}</span>'
+        f"<span>{escape(service)} · {escape(status)} · {escape(base_url)}</span>"
         "</div></header>"
     )
 
@@ -112,10 +133,7 @@ def _live_workspace(client: DashboardApiClient) -> None:
 
     items, error = _queue_subscriber(client.base_url).snapshot()
     if error is not None:
-        st.error(
-            f"\uac80\ud1a0 \ub300\uae30\uc5f4\uc744 \ubd88\ub7ec\uc62c \uc218 \uc5c6\uc2b5\ub2c8\ub2e4: "
-            f"{error.message} [{error.code}]"
-        )
+        st.error(f"검토 대기열을 불러올 수 없습니다: {error.message} [{error.code}]")
         return
 
     left, right = st.columns([0.42, 0.58], gap="large")
@@ -125,9 +143,8 @@ def _live_workspace(client: DashboardApiClient) -> None:
         selected = next((item for item in items if item.id == selected_id), None)
         if selected is None:
             st.info(
-                "\uac80\ud1a0 \ub300\uae30\uc5f4\uc5d0\uc11c \ubcc0\uacbd \ud56d\ubaa9\uc744 "
-                "\uc120\ud0dd\ud558\uc138\uc694. \uc11c\ubc84\uc5d0\uc11c \uc0c8 \ubcc0\uacbd\uc744 "
-                "\uac10\uc9c0\ud558\uba74 \ubaa9\ub85d\uc774 \uc790\ub3d9\uc73c\ub85c \uac31\uc2e0\ub429\ub2c8\ub2e4."
+                "검토 대기열에서 변경 항목을 선택하세요. 서버에서 새 변경을 감지하면 "
+                "목록이 자동으로 갱신됩니다."
             )
         else:
             _render_detail(client, selected)
@@ -136,15 +153,15 @@ def _live_workspace(client: DashboardApiClient) -> None:
 def _render_queue(items: list[ReviewQueueItem]) -> str | None:
     st.html(
         '<div class="ig-panel-heading">'
-        '<h2>\uac80\ud1a0 \ub300\uae30\uc5f4</h2>'
-        f'<span>{_REQUESTED} {len(items)}\uac74 · \uc790\ub3d9 \uac10\uc9c0 \uc911</span>'
+        "<h2>\uac80\ud1a0 \ub300\uae30\uc5f4</h2>"
+        f"<span>{_REQUESTED} {len(items)}\uac74 · \uc790\ub3d9 \uac10\uc9c0 \uc911</span>"
         "</div>"
     )
     if not items:
         st.html(
             '<section class="ig-empty">'
-            '<strong>\uac80\ud1a0\uac00 \ud544\uc694\ud55c \ubcc0\uacbd\uc774 \uc5c6\uc2b5\ub2c8\ub2e4.</strong>'
-            '<span>\uc77c\ubc18 \ubcc0\uacbd\uc740 \uc548\uc804\uc131 \ud310\ub2e8 \ud6c4 \uc790\ub3d9\uc73c\ub85c \uc0c9\uc778\ub429\ub2c8\ub2e4.</span>'
+            "<strong>검토가 필요한 변경이 없습니다.</strong>"
+            "<span>일반 변경은 안전성 판단 후 자동으로 색인됩니다.</span>"
             "</section>"
         )
         st.session_state.pop("selected_queue_item", None)
@@ -155,12 +172,10 @@ def _render_queue(items: list[ReviewQueueItem]) -> str | None:
         label_visibility="collapsed",
     )
     filtered = [
-        item
-        for item in items
-        if query.casefold() in f"{item.path} {item.change_type}".casefold()
+        item for item in items if query.casefold() in f"{item.path} {item.change_type}".casefold()
     ]
     if not filtered:
-        st.info("\uac80\uc0c9 \uc870\uac74\uacfc \uc77c\uce58\ud558\ub294 \ubcc0\uacbd\uc774 \uc5c6\uc2b5\ub2c8\ub2e4.")
+        st.info("검색 조건과 일치하는 변경이 없습니다.")
         return None
     selected_id = st.session_state.get("selected_queue_item")
     if selected_id not in {item.id for item in items}:
@@ -214,7 +229,12 @@ def _render_detail(client: DashboardApiClient, item: ReviewQueueItem) -> None:
         _render_auto_processing(client, item)
         return
     changes, document_info, agent_review, actions = st.tabs(
-        ["\ubcc0\uacbd \ub0b4\uc6a9", "\ubb38\uc11c \uc815\ubcf4", "\uc5d0\uc774\uc804\ud2b8 \ubd84\uc11d", "\uc6b4\uc601\uc790 \uc791\uc5c5"]
+        [
+            "\ubcc0\uacbd \ub0b4\uc6a9",
+            "\ubb38\uc11c \uc815\ubcf4",
+            "\uc5d0\uc774\uc804\ud2b8 \ubd84\uc11d",
+            "\uc6b4\uc601\uc790 \uc791\uc5c5",
+        ]
     )
     with changes:
         if item.summary_status == "PENDING":
@@ -249,15 +269,10 @@ def _render_detail(client: DashboardApiClient, item: ReviewQueueItem) -> None:
     with agent_review:
         _render_agent_review(item)
     with actions:
-        st.markdown(
-            "\uad00\ub9ac\uc790\ub294 \uc5d0\uc774\uc804\ud2b8 \ud310\ub2e8\uacfc "
-            "\uad00\uacc4\uc5c6\uc774 \uc9c1\uc811 \ucc98\ub9ac\ud560 \uc218 \uc788\uc2b5\ub2c8\ub2e4."
-        )
+        st.markdown("관리자는 에이전트 판단과 관계없이 직접 처리할 수 있습니다.")
         st.caption(
-            "\uc0c9\uc778\ud558\uba74 RAG\uc5d0 \ubc18\uc601\ub418\uace0, \ubcf5\uad6c\ud558\uba74 "
-            "\uc791\uc5c5 \ub514\ub809\ud130\ub9ac\ub97c \uae30\uc900 \ubb38\uc11c \uc0c1\ud0dc\ub85c "
-            "\ub418\ub3cc\ub9bd\ub2c8\ub2e4. \ucc98\ub9ac \ud6c4 \ud56d\ubaa9\uc740 "
-            "\ub300\uae30\uc5f4\uc5d0\uc11c \uc0ac\ub77c\uc9d1\ub2c8\ub2e4."
+            "색인하면 RAG에 반영되고, 복구하면 작업 디렉터리를 기준 문서 상태로 "
+            "되돌립니다. 처리 후 항목은 대기열에서 사라집니다."
         )
         allow, restore = st.columns(2)
         with allow:
@@ -269,9 +284,7 @@ def _render_detail(client: DashboardApiClient, item: ReviewQueueItem) -> None:
             ):
                 _run_action(client, item, accept=True)
         with restore:
-            if st.button(
-                "\ubcc0\uacbd \ubcf5\uad6c", width="stretch", key=f"reject-{item.id}"
-            ):
+            if st.button("\ubcc0\uacbd \ubcf5\uad6c", width="stretch", key=f"reject-{item.id}"):
                 _run_action(client, item, accept=False)
 
 
@@ -280,12 +293,13 @@ def _render_auto_processing(client: DashboardApiClient, item: ReviewQueueItem) -
 
     st.html(
         '<section class="ig-auto-process">'
-        '<div>'
-        '<strong>LLM \ud310\ubcc4 \uc644\ub8cc</strong>'
-        '<span>\uc790\ub3d9\uc73c\ub85c \ucc98\ub9ac\ub429\ub2c8\ub2e4.</span>'
-        '<p>5\ucd08 \ud6c4 RAG \uc0c9\uc778\uc5d0 \ubc18\uc601\ub429\ub2c8\ub2e4. \uc544\ub798 \ubc84\ud2bc\uc744 \ub204\ub974\uba74 \uc6b4\uc601\uc790 \uac80\ud1a0\ub85c \uc804\ud658\ud569\ub2c8\ub2e4.</p>'
-        '</div>'
-        '</section>'
+        "<div>"
+        "<strong>LLM \ud310\ubcc4 \uc644\ub8cc</strong>"
+        "<span>\uc790\ub3d9\uc73c\ub85c \ucc98\ub9ac\ub429\ub2c8\ub2e4.</span>"
+        "<p>5초 후 RAG 색인에 반영됩니다. 아래 버튼을 누르면 "
+        "운영자 검토로 전환합니다.</p>"
+        "</div>"
+        "</section>"
     )
     if st.button(
         "LLM \ud310\ubcc4 \uc644\ub8cc \u00b7 \uc790\ub3d9 \ucc98\ub9ac \uc911\uc9c0",
@@ -296,9 +310,9 @@ def _render_auto_processing(client: DashboardApiClient, item: ReviewQueueItem) -
         try:
             client.hold_review_queue_item(item.id)
         except DashboardApiError as exc:
-            st.error(f"\uc790\ub3d9 \ucc98\ub9ac\ub97c \uc911\uc9c0\ud558\uc9c0 \ubabb\ud588\uc2b5\ub2c8\ub2e4: {exc.message} [{exc.code}]")
+            st.error(f"자동 처리를 중지하지 못했습니다: {exc.message} [{exc.code}]")
             return
-        st.success("\uc790\ub3d9 \ucc98\ub9ac\ub97c \uc911\uc9c0\ud558\uace0 \uc6b4\uc601\uc790 \uac80\ud1a0\ub85c \uc804\ud658\ud588\uc2b5\ub2c8\ub2e4.")
+        st.success("자동 처리를 중지하고 운영자 검토로 전환했습니다.")
         st.rerun()
 
 
@@ -326,18 +340,34 @@ def _render_text_comparison(item: ReviewQueueItem) -> None:
 
 def _render_source_texts(item: ReviewQueueItem) -> None:
     if item.change_type == _ADDED:
-        st.code(item.after_text or "\ucd94\ucd9c \uac00\ub2a5\ud55c \ud14d\uc2a4\ud2b8\uac00 \uc5c6\uc2b5\ub2c8\ub2e4.", language="text")
+        st.code(
+            item.after_text
+            or "\ucd94\ucd9c \uac00\ub2a5\ud55c \ud14d\uc2a4\ud2b8\uac00 \uc5c6\uc2b5\ub2c8\ub2e4.",
+            language="text",
+        )
         return
     if item.change_type == _DELETED:
-        st.code(item.before_text or "\ucd94\ucd9c \uac00\ub2a5\ud55c \ud14d\uc2a4\ud2b8\uac00 \uc5c6\uc2b5\ub2c8\ub2e4.", language="text")
+        st.code(
+            item.before_text
+            or "\ucd94\ucd9c \uac00\ub2a5\ud55c \ud14d\uc2a4\ud2b8\uac00 \uc5c6\uc2b5\ub2c8\ub2e4.",
+            language="text",
+        )
         return
     before, after = st.columns(2)
     with before:
         st.caption("\uae30\uc900 \ub0b4\uc6a9")
-        st.code(item.before_text or "\ucd94\ucd9c \uac00\ub2a5\ud55c \ud14d\uc2a4\ud2b8\uac00 \uc5c6\uc2b5\ub2c8\ub2e4.", language="text")
+        st.code(
+            item.before_text
+            or "\ucd94\ucd9c \uac00\ub2a5\ud55c \ud14d\uc2a4\ud2b8\uac00 \uc5c6\uc2b5\ub2c8\ub2e4.",
+            language="text",
+        )
     with after:
         st.caption("\ubcc0\uacbd \ub0b4\uc6a9")
-        st.code(item.after_text or "\ucd94\ucd9c \uac00\ub2a5\ud55c \ud14d\uc2a4\ud2b8\uac00 \uc5c6\uc2b5\ub2c8\ub2e4.", language="text")
+        st.code(
+            item.after_text
+            or "\ucd94\ucd9c \uac00\ub2a5\ud55c \ud14d\uc2a4\ud2b8\uac00 \uc5c6\uc2b5\ub2c8\ub2e4.",
+            language="text",
+        )
 
 
 def _render_document_info(item: ReviewQueueItem) -> None:
@@ -360,9 +390,7 @@ def _render_document_info(item: ReviewQueueItem) -> None:
                     ),
                     "\ud14d\uc2a4\ud2b8": f"{document.extracted_characters:,}\uc790",
                     "\uac10\uc9c0": (
-                        ", ".join(document.artifacts)
-                        if document.artifacts
-                        else "\uc5c6\uc74c"
+                        ", ".join(document.artifacts) if document.artifacts else "\uc5c6\uc74c"
                     ),
                 }
             )
@@ -387,7 +415,9 @@ def _render_agent_review(item: ReviewQueueItem) -> None:
         st.caption("운영자 검토가 필요한 변경에 대해서만 에이전트 대조 분석을 실행합니다.")
         return
     if item.agent_status == "ERROR":
-        st.warning("에이전트 분석을 완료하지 못했습니다. 운영자가 원문과 색인 근거를 직접 확인하세요.")
+        st.warning(
+            "에이전트 분석을 완료하지 못했습니다. 운영자가 원문과 색인 근거를 직접 확인하세요."
+        )
         return
     st.markdown(item.agent_report or "검출된 모순이 없습니다.")
     st.markdown("#### 대조에 사용한 승인 색인 근거")
@@ -407,11 +437,66 @@ def _run_action(client: DashboardApiClient, item: ReviewQueueItem, *, accept: bo
                 else client.reject_review_queue_item(item.id)
             )
     except DashboardApiError as exc:
-        st.error(f"{label} \uc791\uc5c5\uc744 \uc644\ub8cc\ud558\uc9c0 \ubabb\ud588\uc2b5\ub2c8\ub2e4: {exc.message} [{exc.code}]")
+        st.error(f"{label} 작업을 완료하지 못했습니다: {exc.message} [{exc.code}]")
         return
     st.session_state.pop("selected_queue_item", None)
     st.success(result.message)
     st.rerun()
+
+
+def _fetch_verified_replacement(
+    client: _AnalysisReader,
+    original: PreparedAnalysis,
+    replacement_analysis_id: str,
+) -> PreparedAnalysis:
+    """Verify reanalysis lineage before changing the selected analysis."""
+
+    replacement_status = client.get_status(replacement_analysis_id)
+    replacement = client.get_analysis(replacement_analysis_id)
+    issues = replacement_authority_issues(
+        original,
+        replacement_status,
+        replacement,
+        expected_analysis_id=replacement_analysis_id,
+    )
+    if issues:
+        raise DashboardApiError(
+            code="INVALID_GATEWAY_RESPONSE",
+            message=(
+                "The replacement analysis is not bound to the submitted reanalysis "
+                "evidence lineage. The original selection was preserved."
+            ),
+            retryable=False,
+        )
+    return replacement
+
+
+def _finalize_command_navigation(
+    client: _AnalysisReader,
+    original: PreparedAnalysis,
+    replacement_analysis_id: str | None,
+    session_state: _SessionState,
+    idempotency_slot: str,
+) -> PreparedAnalysis | None:
+    """Clear idempotency state only after any replacement is verified."""
+
+    replacement = None
+    if replacement_analysis_id is not None:
+        replacement = _fetch_verified_replacement(
+            client,
+            original,
+            replacement_analysis_id,
+        )
+    del session_state[idempotency_slot]
+    if replacement is not None:
+        session_state["selected_analysis_id"] = replacement.analysis_id
+    return replacement
+
+
+def _command_failure_is_definitive(error: DashboardApiError) -> bool:
+    """Preserve idempotency keys when the command outcome is ambiguous."""
+
+    return not error.retryable and error.code != "INVALID_GATEWAY_RESPONSE"
 
 
 if __name__ == "__main__":

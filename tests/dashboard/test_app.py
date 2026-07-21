@@ -28,8 +28,11 @@ class _EmptyGatewayHandler(BaseHTTPRequestHandler):
         if self.path == "/health":
             self._json(200, {"status": "ok", "service": "document-gateway"})
             return
-        if self.path.startswith("/api/v1/analyses?"):
+        if self.path == "/api/v2/review-queue":
             self._json(200, [])
+            return
+        if self.path.startswith("/api/v2/review-queue/updates?"):
+            self._json(200, {"revision": 0, "items": []})
             return
         self._json(404, {"error": {"code": "NOT_FOUND", "message": "not found"}})
 
@@ -106,6 +109,33 @@ _REQUESTED_ANALYSIS = {
     "prepared_at": "2026-07-21T06:00:00Z",
     "analysis_attempt": 1,
     "supersedes_analysis_id": None,
+}
+
+_REQUESTED_QUEUE_ITEM = {
+    "id": "change_demo",
+    "path": "demo.hwpx",
+    "change_type": "MODIFIED",
+    "status": "REQUESTED",
+    "baseline_sha256": "a" * 64,
+    "candidate_sha256": "b" * 64,
+    "summary_status": "PENDING",
+    "summary": None,
+    "summary_error": None,
+    "created_at": "2026-07-21T06:00:00Z",
+    "updated_at": "2026-07-21T06:00:00Z",
+    "before_text": "김지훈 월급 2000000원",
+    "after_text": "김지훈 일급 2000000원",
+    "review_required": None,
+    "review_reason": None,
+    "auto_processing": False,
+    "auto_process_at": None,
+    "baseline_document": None,
+    "candidate_document": None,
+    "changed_values": [],
+    "agent_status": "NOT_REQUIRED",
+    "agent_report": None,
+    "agent_error": None,
+    "agent_evidence": [],
 }
 
 
@@ -226,14 +256,11 @@ def test_command_navigation_mutates_session_only_after_replacement_verification(
 
 class _RequestedGatewayHandler(_EmptyGatewayHandler):
     def do_GET(self) -> None:  # noqa: N802 - stdlib callback name
-        if self.path.startswith("/api/v1/analyses?"):
-            self._json(200, [_REQUESTED_STATUS])
+        if self.path == "/api/v2/review-queue":
+            self._json(200, [_REQUESTED_QUEUE_ITEM])
             return
-        if self.path == "/api/v1/analyses/anl_demo/status":
-            self._json(200, _REQUESTED_STATUS)
-            return
-        if self.path == "/api/v1/analyses/anl_demo":
-            self._json(200, _REQUESTED_ANALYSIS)
+        if self.path.startswith("/api/v2/review-queue/updates?"):
+            self._json(200, {"revision": 1, "items": [_REQUESTED_QUEUE_ITEM]})
             return
         super().do_GET()
 
@@ -271,7 +298,7 @@ def test_app_renders_live_empty_queue_without_exceptions(monkeypatch) -> None:
         app = AppTest.from_file(str(_APP), default_timeout=10).run()
 
     assert not app.exception
-    assert any("아직 준비된 분석이 없습니다" in message.value for message in app.info)
+    assert any("검토가 필요한 변경이 없습니다" in message.proto.body for message in app.get("html"))
 
 
 def test_app_rejects_plaintext_remote_gateway_configuration(monkeypatch) -> None:
@@ -282,16 +309,16 @@ def test_app_rejects_plaintext_remote_gateway_configuration(monkeypatch) -> None
     assert any("must use HTTPS" in message.value for message in app.error)
 
 
-def test_app_hides_risk_evidence_controls_for_pending_analysis(monkeypatch) -> None:
+def test_app_hides_auto_processing_control_for_pending_analysis(monkeypatch) -> None:
     with _requested_gateway() as api_url:
         monkeypatch.setenv("INDEXGUARD_API_URL", api_url)
         monkeypatch.setenv("INDEXGUARD_OPERATOR_TOKEN", "test-operator-token")
         app = AppTest.from_file(str(_APP), default_timeout=10)
-        app.session_state["selected_analysis_id"] = "anl_demo"
+        app.session_state["selected_queue_item"] = "change_demo"
         app.run()
 
     assert not app.exception
-    assert not any("B" in button.label for button in app.button)
+    assert not any("자동 처리 중지" in button.label for button in app.button)
 
 
 def test_app_does_not_open_an_implicit_first_queue_row(monkeypatch) -> None:
@@ -301,9 +328,9 @@ def test_app_does_not_open_an_implicit_first_queue_row(monkeypatch) -> None:
         app = AppTest.from_file(str(_APP), default_timeout=10).run()
 
     assert not app.exception
-    assert {"Gateway outcome", "Audit"}.issubset(app.dataframe[0].value.columns)
-    assert any("검토 대기열에서 분석 항목을 선택" in message.value for message in app.info)
-    assert not any(button.label == "Send pending request to B" for button in app.button)
+    assert {"파일", "변경", "상태", "요약 상태"}.issubset(app.dataframe[0].value.columns)
+    assert any("검토 대기열에서 변경 항목을 선택" in message.value for message in app.info)
+    assert "selected_queue_item" not in app.session_state
 
 
 def test_command_failure_classification_preserves_ambiguous_idempotency() -> None:

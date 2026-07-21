@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import threading
 import time
@@ -234,7 +235,7 @@ class DirectoryChangeQueue:
             item["auto_processing"] = False
             item["auto_process_at"] = None
             item["review_required"] = True
-            item["review_reason"] = "\uc6b4\uc601\uc790\uac00 \uc790\ub3d9 \ucc98\ub9ac\ub97c \uc911\uc9c0\ud558\uace0 \uac80\ud1a0\ub85c \uc804\ud658\ud588\uc2b5\ub2c8\ub2e4."
+            item["review_reason"] = "운영자가 자동 처리를 중지하고 관리자 검토로 전환했습니다."
             item["updated_at"] = _now()
             self._save_state()
             self._notify_changed_locked()
@@ -276,9 +277,7 @@ class DirectoryChangeQueue:
             self._snapshot_document(accepted["snapshot"], path) if accepted else (None, "")
         )
         candidate_document, after_text = (
-            self._snapshot_document(candidate_snapshot, path)
-            if candidate_snapshot
-            else (None, "")
+            self._snapshot_document(candidate_snapshot, path) if candidate_snapshot else (None, "")
         )
         # Container formats such as HWPX can be rewritten with different ZIP
         # metadata even after the user restores the original document text.
@@ -334,10 +333,19 @@ class DirectoryChangeQueue:
                 return
             before_text, after_text = current["before_text"], current["after_text"]
             path, change_type = current["path"], current["change_type"]
-        if self._model is None:
+        surface_only = change_type == "수정" and _surface_only_equivalent(
+            before_text,
+            after_text,
+        )
+        if surface_only:
+            summary = "조사·띄어쓰기 등 표현만 달라졌으며 핵심 사실은 유지됩니다."
+            review_required = False
+            review_reason = ""
+            error = None
+        elif self._model is None:
             summary = _local_summary(change_type, path, before_text, after_text)
             review_required = True
-            review_reason = "\ubaa8\ub378\uc774 \uc124\uc815\ub418\uc9c0 \uc54a\uc544 \uad00\ub9ac\uc790 \uac80\ud1a0\ub85c \uc720\uc9c0\ud588\uc2b5\ub2c8\ub2e4."
+            review_reason = "모델이 설정되지 않아 관리자 검토로 유지했습니다."
             error = "MODEL_DISABLED"
         else:
             try:
@@ -354,9 +362,7 @@ class DirectoryChangeQueue:
             except Exception as exc:
                 summary = _local_summary(change_type, path, before_text, after_text)
                 review_required = True
-                review_reason = (
-                    "\ubaa8\ub378 \ud310\ubcc4\uc744 \uc644\ub8cc\ud558\uc9c0 \ubabb\ud574 \uad00\ub9ac\uc790 \uac80\ud1a0\ub85c \uc720\uc9c0\ud588\uc2b5\ub2c8\ub2e4."
-                )
+                review_reason = "모델 판별을 완료하지 못해 관리자 검토로 유지했습니다."
                 error = type(exc).__name__
             else:
                 error = None
@@ -410,10 +416,11 @@ class DirectoryChangeQueue:
                 raise RuntimeError("agent model is disabled")
             report = self._model.analyze_agent_task(
                 task=(
-                    "Act as a read-only Korean consistency-review agent. Compare the proposed document "
-                    "change with the approved-index evidence. Identify only concrete contradictions, "
-                    "such as a proposed salary exceeding a cited company limit. For every finding cite "
-                    "a source label [S#]. If no contradiction is supported, clearly say so. Do not "
+                    "Act as a read-only Korean consistency-review agent. Compare the "
+                    "proposed document change with the approved-index evidence. Identify "
+                    "only concrete contradictions, such as a proposed salary exceeding a "
+                    "cited company limit. For every finding cite a source label [S#]. If no "
+                    "contradiction is supported, clearly say so. Do not "
                     "recommend indexing, editing, or executing any action."
                 ),
                 evidence={
@@ -491,9 +498,7 @@ class DirectoryChangeQueue:
                 item["auto_processing"] = False
                 item["auto_process_at"] = None
                 item["review_required"] = True
-                item["review_reason"] = (
-                    "\uc790\ub3d9 \uc0c9\uc778\uc5d0 \uc2e4\ud328\ud558\uc5ec \uad00\ub9ac\uc790 \uac80\ud1a0\ub85c \uc804\ud658\ud588\uc2b5\ub2c8\ub2e4."
-                )
+                item["review_reason"] = "자동 색인에 실패하여 관리자 검토로 전환했습니다."
                 item["updated_at"] = _now()
                 changed = True
         return changed
@@ -707,7 +712,91 @@ def _mandatory_reason(change_type: str, before: str, after: str) -> str | None:
     injection = ("ignore previous", "system prompt", "지시를 무시", "프롬프트", "prompt injection")
     if any(term in combined for term in injection):
         return "프롬프트 인젝션 또는 지시문 삽입 가능성이 있습니다."
+    if _numeric_values(before) != _numeric_values(after):
+        return "숫자 또는 값이 변경되어 관리자 검토가 필요합니다."
+    before_fact = _compensation_fact(before)
+    after_fact = _compensation_fact(after)
+    if before_fact is not None and after_fact is not None:
+        before_subject, before_attribute, _ = before_fact
+        after_subject, after_attribute, _ = after_fact
+        if before_subject != after_subject:
+            return "급여 사실의 대상 인물이 변경되어 관리자 검토가 필요합니다."
+        if before_attribute != after_attribute:
+            return "급여의 기준 단위 또는 속성이 변경되어 관리자 검토가 필요합니다."
     return None
+
+
+_TOKEN_PATTERN = re.compile(r"[A-Za-z]+|[가-힣]+|\d[\d,]*(?:\.\d+)?")
+_NUMBER_PATTERN = re.compile(r"\d[\d,]*(?:\.\d+)?")
+_COMPENSATION_FACT_PATTERN = re.compile(
+    r"(?P<subject>[A-Za-z가-힣][A-Za-z0-9가-힣_-]{1,29})\s+"
+    r"(?P<attribute>월급|일급|시급|주급|연봉|기본급|특별급여|월급여|일급여)\s*"
+    r"(?P<value>\d[\d,]*(?:\.\d+)?)\s*원?",
+    re.IGNORECASE,
+)
+_KOREAN_PARTICLES = (
+    "으로",
+    "에서",
+    "에게",
+    "까지",
+    "부터",
+    "의",
+    "은",
+    "는",
+    "이",
+    "가",
+    "을",
+    "를",
+    "에",
+    "로",
+    "와",
+    "과",
+    "도",
+    "만",
+)
+
+
+def _surface_only_equivalent(before: str, after: str) -> bool:
+    """Recognize bounded particle, spacing, and punctuation-only rewrites."""
+
+    if not before.strip() or not after.strip() or before == after:
+        return False
+    return _surface_normal_form(before) == _surface_normal_form(after)
+
+
+def _surface_normal_form(value: str) -> tuple[str, ...]:
+    normalized: list[str] = []
+    for match in _TOKEN_PATTERN.finditer(value):
+        token = match.group(0)
+        if _NUMBER_PATTERN.fullmatch(token):
+            normalized.append(token.replace(",", ""))
+            continue
+        if token.isascii():
+            normalized.append(token.casefold())
+            continue
+        normalized.append(_strip_korean_particle(token))
+    return tuple(normalized)
+
+
+def _strip_korean_particle(token: str) -> str:
+    for particle in _KOREAN_PARTICLES:
+        if token.endswith(particle) and len(token) > len(particle) + 1:
+            return token[: -len(particle)]
+    return token
+
+
+def _numeric_values(value: str) -> tuple[str, ...]:
+    return tuple(match.group(0).replace(",", "") for match in _NUMBER_PATTERN.finditer(value))
+
+
+def _compensation_fact(value: str) -> tuple[str, str, str] | None:
+    match = _COMPENSATION_FACT_PATTERN.search(value)
+    if match is None:
+        return None
+    subject = _strip_korean_particle(match.group("subject")).casefold()
+    attribute = match.group("attribute").replace("급여", "급").casefold()
+    amount = match.group("value").replace(",", "")
+    return subject, attribute, amount
 
 
 def _local_summary(change_type: str, path: str, before: str, after: str) -> str:
@@ -715,7 +804,10 @@ def _local_summary(change_type: str, path: str, before: str, after: str) -> str:
         return f"{path} 파일이 새로 추가되었습니다. 문서 전체 내용이 색인 후보입니다."
     if change_type == "삭제":
         return f"{path} 파일이 삭제되었습니다. 기존 문서 전체를 색인에서 제거할지 검토해야 합니다."
-    return f"{path} 파일의 내용이 변경되었습니다. 모델 요약을 사용할 수 없어 변경 전후 원문을 함께 검토해야 합니다."
+    return (
+        f"{path} 파일의 내용이 변경되었습니다. 모델 요약을 사용할 수 없어 "
+        "변경 전후 원문을 함께 검토해야 합니다."
+    )
 
 
 def _changed_values(before: str, after: str) -> list[dict[str, str]]:

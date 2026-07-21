@@ -16,7 +16,10 @@ from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 
 from indexguard.contracts import (
     AnalysisStatusView,
+    CurrentIndexView,
     IndexAction,
+    IndexSearchHit,
+    IndexSearchResponse,
     OperatorAction,
     OperatorCommand,
     OperatorCommandResult,
@@ -37,16 +40,8 @@ class HealthStatus(_StrictView):
     service: str
 
 
-class SearchHit(_StrictView):
-    document_id: str
-    sha256: str
-    chunk_index: int
-    text: str
-
-
-class SearchResponse(_StrictView):
-    query: str
-    results: list[SearchHit]
+SearchHit = IndexSearchHit
+SearchResponse = IndexSearchResponse
 
 
 class DocumentInfo(_StrictView):
@@ -220,8 +215,22 @@ class DashboardApiClient:
         params: dict[str, object] = {"q": query, "limit": limit}
         if document_id is not None:
             params["document_id"] = document_id
-        payload = self._request_json("GET", "/api/v1/index/search", params=params)
+        payload = self._request_json(
+            "GET",
+            "/api/v1/index/search",
+            params=params,
+            headers=self._operator_headers(),
+        )
         return self._validate(SearchResponse, payload)
+
+    def get_current_index(self, document_id: str) -> CurrentIndexView:
+        payload = self._request_json(
+            "GET",
+            "/api/v1/index/current",
+            params={"document_id": document_id},
+            headers=self._operator_headers(),
+        )
+        return self._validate(CurrentIndexView, payload)
 
     def review_repository(self) -> RepositoryReviewReport:
         payload = self._request_json(
