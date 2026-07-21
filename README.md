@@ -4,6 +4,43 @@
 
 IndexGuard는 **PDF·DOCX·HWPX 문서를 정규화·비교하고, 독립 AI 위험 분석 서비스의 판정을 검증해 숫자·정책 왜곡과 간접 프롬프트 인젝션이 RAG에 들어가기 전에 차단하는 보안 게이트**입니다.
 
+## 실행 가능한 데모 사이트
+
+> **로컬 데모:** [IndexGuard 운영자 콘솔](http://localhost:8501) · [A API 문서](http://127.0.0.1:8000/docs) · [B API 문서](http://127.0.0.1:9000/docs)
+
+현재 공개 배포 URL은 없으며, 위 링크는 아래 세 프로세스를 실행하면 활성화됩니다. 먼저 저장소
+루트에서 `uv sync --extra dev --extra dashboard`를 한 번 실행합니다.
+
+터미널 1 — B 위험 분석 서비스:
+
+```powershell
+$env:INDEXGUARD_B_SERVICE_TOKEN = "indexguard-a-to-b-demo"
+$env:INDEXGUARD_B_LLM_ENABLED = "false"
+uv run indexguard-risk-api
+```
+
+터미널 2 — A 문서 게이트웨이:
+
+```powershell
+$env:INDEXGUARD_OPERATOR_TOKEN = "indexguard-operator-demo"
+$env:INDEXGUARD_B_ANALYZE_URL = "http://127.0.0.1:9000/analyze"
+$env:INDEXGUARD_B_OUTBOUND_TOKEN = "indexguard-a-to-b-demo"
+uv run indexguard-api
+```
+
+터미널 3 — C 운영자 콘솔:
+
+```powershell
+$env:INDEXGUARD_API_URL = "http://127.0.0.1:8000"
+$env:INDEXGUARD_OPERATOR_TOKEN = "indexguard-operator-demo"
+$env:INDEXGUARD_OPERATOR_ACTOR = "demo-operator"
+uv run --extra dashboard streamlit run apps/dashboard/app.py
+```
+
+실행 후 [http://localhost:8501](http://localhost:8501)에서 PDF·DOCX·HWPX 기준본과 변경본을
+올려 Diff, 숫자 변경, 추출 흔적, B 분석 결과와 실제 색인 상태를 확인할 수 있습니다. B가 중지되거나
+잘못된 응답을 반환하면 A는 위험 분석을 실패 상태로 유지하고 문서를 색인하지 않습니다.
+
 ## 24시간 MVP
 
 이번 제출물의 완성 기준은 기능 수가 아니라 아래 한 흐름의 종단간 동작입니다.
@@ -42,7 +79,8 @@ PDF / DOCX / HWPX
 ```text
 IndexGuard/
 ├─ apps/
-│  └─ api/                       # FastAPI 호환 진입점
+│  ├─ api/                       # FastAPI 호환 진입점
+│  └─ dashboard/                 # C Streamlit 운영자 증거 워크벤치
 ├─ src/indexguard/
 │  ├─ contracts.py               # 팀 공통 스키마의 단일 기준
 │  ├─ pipeline.py                # 종단간 분석 오케스트레이션
@@ -50,7 +88,9 @@ IndexGuard/
 │  ├─ audit.py                   # SQLite 감사 해시 체인과 provenance
 │  ├─ scanner.py / watcher.py    # 문서 폴더 스냅샷과 지속 감시
 │  ├─ git_watcher.py             # staged/unstaged Git diff 직접 감시
-│  ├─ risk_client.py             # 독립 B HTTP 분석기 어댑터
+│  ├─ risk_client.py             # A에서 독립 B로 보내는 HTTP 어댑터
+│  ├─ risk_engine.py             # B 정적 규칙·선택적 LLM·2차 감사와 판정
+│  ├─ risk_api.py                # B /analyze 독립 FastAPI 서비스
 │  ├─ mcp_server.py              # AI 호스트용 B 전용 MCP 어댑터
 │  ├─ extractors/                # PDF/DOCX/HWPX 입력 어댑터
 │  ├─ detectors/                 # 결정적 Diff와 숫자 변경 추출
@@ -83,6 +123,31 @@ IndexGuard/
 - C의 `APPROVE / HOLD / REANALYZE` 명령과 idempotency 감사
 - 승인되지 않은 후보의 RAG 색인 차단과 이전 안전 버전 복원
 
+## B 위험 분석 서비스 실행
+
+B는 A가 제공한 정규화 전후 텍스트·Diff·artifact만 분석하며 원본 파일, RAG 색인기, C 명령에는
+접근하지 않습니다. 정적 규칙은 항상 실행되고, LLM은 위험 점수를 올리거나 근거를 추가할 수 있지만
+hard-block을 해제할 수 없습니다. 정적 또는 1차 LLM 점수가 70 이상이면 독립적인 2차 감사 프롬프트가
+한 번 더 실행됩니다.
+
+```powershell
+$env:INDEXGUARD_B_SERVICE_TOKEN = "<same-value-as-A-outbound-token>"
+$env:INDEXGUARD_B_LLM_ENABLED = "false"  # 로컬 LLM 연결 시 true
+uv run indexguard-risk-api
+```
+
+기본 주소는 `http://127.0.0.1:9000`이고 분석 endpoint는 `POST /analyze`입니다. LLM을 켜면
+`INDEXGUARD_OPENAI_BASE_URL`, `INDEXGUARD_OPENAI_MODEL`, 선택적인 `INDEXGUARD_OPENAI_API_KEY`를
+사용합니다. LLM 오류·잘못된 JSON·위험 근거와 점수의 모순은 자동 승인으로 이어지지 않습니다.
+
+합성 fixture 평가는 다음 명령으로 재현합니다. 출력 수치는 이 5개 fixture에만 해당하며 일반화된
+성능 주장으로 사용하지 않습니다.
+
+```powershell
+uv run indexguard-risk-eval
+uv run indexguard-risk-eval --output data/runtime/risk-evaluation.json
+```
+
 ## 이번에 만들지 않는 것
 
 - 레거시 바이너리 `.hwp` 파싱
@@ -97,11 +162,34 @@ IndexGuard/
 ## A 문서 게이트웨이 실행
 
 ```powershell
-uv sync --extra dev
+$env:INDEXGUARD_OPERATOR_TOKEN = "<operator-token>"
+$env:INDEXGUARD_B_ANALYZE_URL = "http://127.0.0.1:9000/analyze"
+$env:INDEXGUARD_B_OUTBOUND_TOKEN = "<same-value-as-B-service-token>"
+uv sync --extra dev --extra dashboard
 uv run indexguard-api
 ```
 
 API는 `http://127.0.0.1:8000`에서 실행되며 상세 흐름은 [A 게이트웨이 문서](docs/A_GATEWAY.md)를 따릅니다.
+
+## C 운영자 콘솔 실행
+
+콘솔은 A의 큐·분석 증거·정책 결과·게이트웨이 결과를 표시하고, A가 현재 상태에서 허용한
+`APPROVE / HOLD / REANALYZE` 명령만 전송합니다. 브라우저에서 위험을 계산하거나 저장소와
+색인기에 직접 접근하지 않습니다.
+
+```powershell
+$env:INDEXGUARD_API_URL = "http://127.0.0.1:8000"
+$env:INDEXGUARD_OPERATOR_TOKEN = "<same-operator-token-as-A>"
+$env:INDEXGUARD_OPERATOR_ACTOR = "<audit-actor-label>"  # 선택 사항
+uv sync --extra dev --extra dashboard
+uv run --extra dashboard streamlit run apps/dashboard/app.py
+```
+
+기본 주소는 `http://localhost:8501`이며 프로젝트 설정이 콘솔을 `127.0.0.1`에만 바인딩합니다.
+외부 인증·접근 제어 없이 이 바인딩을 공용 인터페이스로 변경하지 않습니다. 루프백이 아닌 A
+주소는 HTTPS여야 하며 토큰을 URL에 넣지 않습니다. 운영자 토큰이 없으면 공개 상태 큐는 볼 수
+있지만 상세 증거와 명령은 fail-closed로 차단됩니다. `ALLOW + INDEX` 정책 결과, 요청된 액션,
+실제 색인 결과는 화면에서 별도 사실로 표시됩니다.
 
 지속 폴더 감시는 별도 프로세스로 실행합니다.
 

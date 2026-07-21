@@ -25,9 +25,14 @@ dev = [
   "pytest>=8,<10",
   "ruff>=0.11,<1",
 ]
+dashboard = [
+  "streamlit>=1.59,<2",
+]
 
 [project.scripts]
 indexguard-api = "indexguard.api:run"
+indexguard-risk-api = "indexguard.risk_api:run"
+indexguard-risk-eval = "indexguard.risk_evaluation:main"
 indexguard-mcp = "indexguard.mcp_server:run_stdio"
 indexguard-mcp-http = "indexguard.mcp_server:run_http"
 indexguard-scan = "indexguard.scanner:main"
@@ -36,7 +41,12 @@ indexguard-watch-git = "indexguard.git_watcher:main"
 indexguard-product-demo = "indexguard.product_pipeline:main"
 
 [tool.setuptools.packages.find]
-where = ["src"]
+where = ["src", "."]
+include = ["indexguard*", "apps*"]
+exclude = ["tests*"]
+
+[tool.setuptools.package-data]
+"apps.dashboard" = ["assets/*.css"]
 
 [tool.pytest.ini_options]
 addopts = "-ra"

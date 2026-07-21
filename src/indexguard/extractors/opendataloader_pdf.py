@@ -71,12 +71,24 @@ def normalize_pdf_with_opendataloader(
 
     try:
         with tempfile.TemporaryDirectory(prefix="indexguard-opendataloader-") as temporary:
-            output_dir = Path(temporary)
+            work_dir = Path(temporary)
+            input_pdf = work_dir / "source.pdf"
+            output_dir = work_dir / "output"
+            output_dir.mkdir()
+            # BlobStore uses a content hash as the staged filename. The external
+            # converter requires a PDF suffix even after A verified its magic.
+            shutil.copyfile(path, input_pdf)
             # The third-party wrapper invokes the literal ``java`` command and
             # exposes no timeout.  Isolate it in a child process so a malformed
             # PDF cannot hang the watcher; its PATH is fixed only for that child.
             result = subprocess.run(
-                [sys.executable, "-c", _OPENDATALOADER_CONVERT_SCRIPT, str(path), str(output_dir)],
+                [
+                    sys.executable,
+                    "-c",
+                    _OPENDATALOADER_CONVERT_SCRIPT,
+                    str(input_pdf),
+                    str(output_dir),
+                ],
                 check=False,
                 capture_output=True,
                 timeout=timeout_seconds,
@@ -92,10 +104,9 @@ def normalize_pdf_with_opendataloader(
             if not markdown_files:
                 return OpenDataLoaderNormalization(None, "failed", "markdown_output_missing")
             raw_markdown = "\n".join(
-                markdown.read_text(encoding="utf-8", errors="strict")
-                for markdown in markdown_files
+                markdown.read_text(encoding="utf-8", errors="strict") for markdown in markdown_files
             )
-    except (OSError, RuntimeError, UnicodeError, subprocess.TimeoutExpired) as exc:
+    except (OSError, RuntimeError, UnicodeError, subprocess.SubprocessError) as exc:
         return OpenDataLoaderNormalization(None, "failed", type(exc).__name__)
 
     if len(raw_markdown) > limits.max_text_chars:
