@@ -239,8 +239,13 @@ def build_snapshot(
     parser_version: str,
     collector: ExtractionCollector,
     metadata: dict[str, object] | None = None,
+    visible_body_override: str | None = None,
 ) -> DocumentSnapshot:
-    body = compose_visible_body(collector.units)
+    body = (
+        visible_body_override
+        if visible_body_override is not None
+        else compose_visible_body(collector.units)
+    )
     if not body:
         raise MalformedDocumentError("document has no extractable visible body text")
     normalized = normalize_body_text(body)

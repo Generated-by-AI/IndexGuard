@@ -28,6 +28,7 @@ from .base import (
     read_staged_bytes,
     verify_staged_file,
 )
+from .opendataloader_pdf import normalize_pdf_with_opendataloader
 
 PDF_MAGIC = b"%PDF-"
 
@@ -101,7 +102,7 @@ def _opaque_cover_drawings(page) -> list[tuple[int, tuple[float, ...]]]:
 
 class PdfExtractor(BaseExtractor):
     format = DocumentFormat.PDF
-    parser_name = "pymupdf-security"
+    parser_name = "pymupdf-security+opendataloader-layout"
 
     @classmethod
     def probe(cls, staged: StagedFile, limits: ExtractionLimits = DEFAULT_LIMITS) -> None:
@@ -271,6 +272,23 @@ class PdfExtractor(BaseExtractor):
                         )
                     )
 
+            opendataloader = normalize_pdf_with_opendataloader(staged.path, limits=limits)
+            visible_body_override = opendataloader.text
+            if visible_body_override is not None and _contains_hidden_text(
+                visible_body_override,
+                page_units=collector.units,
+            ):
+                visible_body_override = None
+                opendataloader_metadata: dict[str, object] = {
+                    "status": "rejected",
+                    "detail": "contains_hidden_text_evidence",
+                }
+            else:
+                opendataloader_metadata = {
+                    "status": opendataloader.status,
+                    "detail": opendataloader.detail,
+                }
+
             return build_snapshot(
                 staged=staged,
                 document_id=document_id,
@@ -278,7 +296,12 @@ class PdfExtractor(BaseExtractor):
                 parser_name=self.parser_name,
                 parser_version=self.parser_version,
                 collector=collector,
-                metadata={"page_count": page_count, "xref_count": xref_count},
+                metadata={
+                    "page_count": page_count,
+                    "xref_count": xref_count,
+                    "opendataloader": opendataloader_metadata,
+                },
+                visible_body_override=visible_body_override,
             )
         except (EncryptedDocumentError, MalformedDocumentError):
             raise
@@ -294,3 +317,15 @@ def extract_pdf(
     limits: ExtractionLimits = DEFAULT_LIMITS,
 ) -> DocumentSnapshot:
     return PdfExtractor().extract(staged, document_id, limits)
+
+
+def _contains_hidden_text(visible_body: str, *, page_units: list[TextUnit]) -> bool:
+    """Reject a layout body if it reintroduces PyMuPDF-hidden text evidence."""
+
+    normalized_body = "".join(visible_body.split())
+    for unit in page_units:
+        if unit.visibility is not Visibility.HIDDEN_SUSPECTED or not unit.text.strip():
+            continue
+        if "".join(unit.text.split()) in normalized_body:
+            return True
+    return False
