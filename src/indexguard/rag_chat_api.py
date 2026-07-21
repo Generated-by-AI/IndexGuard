@@ -3,16 +3,21 @@
 from __future__ import annotations
 
 import os
+import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
 from indexguard.openai_compat import OpenAICompatibleClient, OpenAICompatibleSettings
+from indexguard.errors import ExternalServiceError
 from indexguard.rag.indexer import SqliteIndexer
+
+logger = logging.getLogger(__name__)
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 class ChatRequest(BaseModel):
@@ -34,8 +39,19 @@ class ChatResponse(BaseModel):
 def create_rag_chat_app(runtime_dir: Path | None = None) -> FastAPI:
     """Serve the independent, read-only intranet RAG chat on port 8010."""
 
-    selected_runtime = runtime_dir or Path(
-        os.getenv("INDEXGUARD_RAG_RUNTIME_DIR", os.getenv("INDEXGUARD_RUNTIME_DIR", "data/runtime"))
+    configured_runtime = Path(
+        os.getenv(
+            "INDEXGUARD_RAG_RUNTIME_DIR",
+            os.getenv("INDEXGUARD_RUNTIME_DIR", "data/runtime"),
+        )
+    )
+    # 8010 is often launched from a terminal whose working directory is not
+    # the repository. Resolve relative runtime settings against the project,
+    # otherwise the chat service silently opens a fresh, empty SQLite index.
+    selected_runtime = runtime_dir or (
+        configured_runtime
+        if configured_runtime.is_absolute()
+        else _PROJECT_ROOT / configured_runtime
     )
     indexer = SqliteIndexer(selected_runtime / "index.db")
 
@@ -79,11 +95,20 @@ def create_rag_chat_app(runtime_dir: Path | None = None) -> FastAPI:
             }
             for position, hit in enumerate(hits, start=1)
         ]
-        answer = OpenAICompatibleClient(OpenAICompatibleSettings.from_environment()).answer_rag_question(
-            question=request.question,
-            history=[],
-            evidence=evidence,
-        )
+        try:
+            answer = OpenAICompatibleClient(
+                OpenAICompatibleSettings.from_environment()
+            ).answer_rag_question(
+                question=request.question,
+                history=[],
+                evidence=evidence,
+            )
+        except ExternalServiceError:
+            logger.exception("intranet RAG model request failed")
+            raise HTTPException(
+                status_code=503,
+                detail="사내 언어 모델에 연결할 수 없어 답변을 생성하지 못했습니다.",
+            ) from None
         return ChatResponse(answer=answer, citations=citations)
 
     return app

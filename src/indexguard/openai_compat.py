@@ -377,6 +377,7 @@ class OpenAICompatibleClient:
                 "history": [dict(turn) for turn in history],
                 "evidence": [dict(source) for source in evidence],
             },
+            disable_reasoning=True,
         )
 
     def _complete(
