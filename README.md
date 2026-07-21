@@ -4,6 +4,34 @@
 
 IndexGuard는 **PDF·DOCX·HWPX 문서를 정규화·비교하고, 독립 AI 위험 분석 서비스의 판정을 검증해 숫자·정책 왜곡과 간접 프롬프트 인젝션이 RAG에 들어가기 전에 차단하는 보안 게이트**입니다.
 
+## 실행 가능한 데모 사이트
+
+> **로컬 데모:** [IndexGuard 운영자 콘솔](http://localhost:8501) · [A API 문서](http://127.0.0.1:8000/docs) · [상태 확인](http://127.0.0.1:8000/health)
+
+현재 공개 배포 URL은 없으며, 위 링크는 아래 두 프로세스를 실행하면 활성화됩니다. 저장소 루트에서
+터미널 두 개를 열고 같은 운영자 토큰을 사용합니다.
+
+터미널 1 — A 문서 게이트웨이:
+
+```powershell
+$env:INDEXGUARD_OPERATOR_TOKEN = "indexguard-local-demo"
+uv sync --extra dev --extra dashboard
+uv run indexguard-api
+```
+
+터미널 2 — C 운영자 콘솔:
+
+```powershell
+$env:INDEXGUARD_API_URL = "http://127.0.0.1:8000"
+$env:INDEXGUARD_OPERATOR_TOKEN = "indexguard-local-demo"
+$env:INDEXGUARD_OPERATOR_ACTOR = "demo-operator"
+uv run --extra dashboard streamlit run apps/dashboard/app.py
+```
+
+실행 후 [http://localhost:8501](http://localhost:8501)에서 PDF·DOCX·HWPX 기준본과 변경본을
+올려 Diff, 숫자 변경, 추출 흔적, B 분석 결과와 실제 색인 상태를 확인할 수 있습니다. B 분석기를
+연결하지 않은 상태에서는 위험 분석 요청이 fail-closed로 거절되며 문서는 색인되지 않습니다.
+
 ## 24시간 MVP
 
 이번 제출물의 완성 기준은 기능 수가 아니라 아래 한 흐름의 종단간 동작입니다.
