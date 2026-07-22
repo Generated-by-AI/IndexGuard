@@ -1,47 +1,33 @@
 # IndexGuard
 
-> 문서가 RAG의 지식이 되기 전에 검증한다.
+> **기억 전에, 검증.**
 
 IndexGuard는 **PDF·DOCX·HWPX 문서를 정규화·비교하고, 독립 AI 위험 분석 서비스의 판정을 검증해 숫자·정책 왜곡과 간접 프롬프트 인젝션이 RAG에 들어가기 전에 차단하는 보안 게이트**입니다.
 
-## 실행 가능한 데모 사이트
+## Live Demo
 
-> **로컬 데모:** [IndexGuard 운영자 콘솔](http://localhost:8501) · [A API 문서](http://127.0.0.1:8000/docs) · [B API 문서](http://127.0.0.1:9000/docs)
+### [▶ IndexGuard 운영자 콘솔 바로 실행](http://180.83.163.30:8501)
 
-현재 공개 배포 URL은 없으며, 위 링크는 아래 세 프로세스를 실행하면 활성화됩니다. 먼저 저장소
-루트에서 `uv sync --extra dev --extra dashboard`를 한 번 실행합니다.
+> **CODEGATE 2026 심사용 공개 배포:** [http://180.83.163.30:8501](http://180.83.163.30:8501)
+>
+> **로컬 개발:** [운영자 콘솔](http://localhost:8501) · [A API 문서](http://127.0.0.1:8000/docs) · [B API 문서](http://127.0.0.1:9000/docs)
 
-터미널 1 — B 위험 분석 서비스:
+라이브 데모에서 문서 변경 감지, 전후 Diff, 위험 근거, `ALLOW / REVIEW / BLOCK` 판정과
+실제 `INDEX / HOLD / QUARANTINE` 상태를 한 화면에서 확인할 수 있습니다.
 
-```powershell
-$env:INDEXGUARD_B_SERVICE_TOKEN = "indexguard-a-to-b-demo"
-$env:INDEXGUARD_B_LLM_ENABLED = "false"
-uv run indexguard-risk-api
-```
+### 심사 시연 포인트
 
-터미널 2 — A 문서 게이트웨이:
+| 변경 예시 | 기대 판정 | 판단 근거 |
+|---|---|---|
+| `김지훈 월급 2,000,000원` → `김지훈의 월급 2,000,000원` | `ALLOW` | 조사가 추가됐지만 의미는 동일 |
+| `2,000,000원` → `20,000,000원` | `BLOCK` | 핵심 금액이 10배 변경 |
+| `월급` → `일급` | `BLOCK` | 지급 주기·정책 의미 변경 |
+| `김지훈` → `김철수` | `BLOCK` | 정책 적용 대상 변경 |
 
-```powershell
-$env:INDEXGUARD_OPERATOR_TOKEN = "indexguard-operator-demo"
-$env:INDEXGUARD_B_ANALYZE_URL = "http://127.0.0.1:9000/analyze"
-$env:INDEXGUARD_B_OUTBOUND_TOKEN = "indexguard-a-to-b-demo"
-uv run indexguard-api
-```
+IndexGuard는 문장 표면의 모든 차이를 위험으로 간주하지 않습니다. **의미 없는 표현 변화는 통과시키고,
+금액·단위·대상·정책과 숨겨진 지시문의 변조는 근거와 함께 차단**합니다.
 
-터미널 3 — C 운영자 콘솔:
-
-```powershell
-$env:INDEXGUARD_API_URL = "http://127.0.0.1:8000"
-$env:INDEXGUARD_OPERATOR_TOKEN = "indexguard-operator-demo"
-$env:INDEXGUARD_OPERATOR_ACTOR = "demo-operator"
-uv run --extra dashboard streamlit run apps/dashboard/app.py
-```
-
-실행 후 [http://localhost:8501](http://localhost:8501)에서 PDF·DOCX·HWPX 기준본과 변경본을
-올려 Diff, 숫자 변경, 추출 흔적, B 분석 결과와 실제 색인 상태를 확인할 수 있습니다. B가 중지되거나
-잘못된 응답을 반환하면 A는 위험 분석을 실패 상태로 유지하고 문서를 색인하지 않습니다.
-
-## 24시간 MVP
+## 핵심 데모 시나리오
 
 이번 제출물의 완성 기준은 기능 수가 아니라 아래 한 흐름의 종단간 동작입니다.
 
@@ -73,6 +59,17 @@ PDF / DOCX / HWPX
 중요한 불변식은 하나입니다.
 
 > B가 `ALLOW + INDEX`를 반환하고 C가 같은 후보 SHA-256을 확인해 `APPROVE`한 문서만 색인할 수 있다.
+
+## 기술 스택
+
+| 영역 | 사용 기술 | 역할 |
+|---|---|---|
+| 문서 처리 | HWPX ZIP/XML 보안 파서, OpenDataLoader PDF, PyMuPDF, DOCX XML 파서 | PDF·DOCX·HWPX 검증·정규화·숨김 요소 탐지 |
+| 게이트웨이 | Python 3.11+, FastAPI, Pydantic v2, HTTPX | A 수집·무결성 검증·판정 상태 머신·B 연동 |
+| AI 위험 분석 | 결정적 규칙, OpenAI 호환 sLLM, 2차 감사 | 숫자·정책·프롬프트 인젝션 탐지와 근거 생성 |
+| 운영 콘솔 | Streamlit | Diff·위험 근거·색인 상태·운영자 명령 표시 |
+| 감사·색인 | SQLite, SHA-256 감사 체인 | 변경 이력의 위변조 방지와 승인 문서만 RAG 색인 |
+| 자동화·연동 | Git watcher, FastMCP | staged/unstaged Diff 감시와 AI 호스트 분석 인터페이스 |
 
 ## 구현된 GitHub 구조
 
@@ -148,7 +145,7 @@ uv run indexguard-risk-eval
 uv run indexguard-risk-eval --output data/runtime/risk-evaluation.json
 ```
 
-## 이번에 만들지 않는 것
+## MVP 범위와 제한
 
 - 레거시 바이너리 `.hwp` 파싱
 - 복잡한 Git 기반 문서 버전 관리와 watcher 이벤트의 자동 baseline 선택
@@ -185,11 +182,11 @@ uv sync --extra dev --extra dashboard
 uv run --extra dashboard streamlit run apps/dashboard/app.py
 ```
 
-기본 주소는 `http://localhost:8501`이며 프로젝트 설정이 콘솔을 `127.0.0.1`에만 바인딩합니다.
-외부 인증·접근 제어 없이 이 바인딩을 공용 인터페이스로 변경하지 않습니다. 루프백이 아닌 A
-주소는 HTTPS여야 하며 토큰을 URL에 넣지 않습니다. 운영자 토큰이 없으면 공개 상태 큐는 볼 수
-있지만 상세 증거와 명령은 fail-closed로 차단됩니다. `ALLOW + INDEX` 정책 결과, 요청된 액션,
-실제 색인 결과는 화면에서 별도 사실로 표시됩니다.
+공개 심사용 데모는 [http://180.83.163.30:8501](http://180.83.163.30:8501)에 배포되어 있으며,
+로컬 실행의 기본 주소는 `http://localhost:8501`입니다. 로컬 기본 설정은 콘솔을 `127.0.0.1`에
+바인딩하고, 공개 배포 설정과 분리합니다. 운영자 토큰을 URL에 넣지 않으며, 토큰이 없으면 공개
+상태 큐는 볼 수 있지만 상세 증거와 명령은 fail-closed로 차단됩니다. `ALLOW + INDEX` 정책 결과,
+요청된 액션, 실제 색인 결과는 화면에서 별도 사실로 표시됩니다.
 
 지속 폴더 감시는 별도 프로세스로 실행합니다.
 
